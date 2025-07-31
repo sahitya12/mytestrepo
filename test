@@ -1,35 +1,47 @@
 @echo off
 setlocal enabledelayedexpansion
 
+REM Output file
 set OUTPUT=azure_firewall_status.csv
 echo Subscription Name,Subscription ID,Firewall Deployed > %OUTPUT%
 
-REM Get list of subscriptions
-for /f "skip=1 tokens=1,2 delims=," %%A in ('az account list --query "[].{Name:name, Id:id}" -o tsv') do (
-    set SUB_NAME=%%A
-    set SUB_ID=%%B
+REM Get list of subscriptions (Name and ID)
+for /f "tokens=1* delims=:" %%A in ('az account list --query "[].{Name:name, Id:id}" -o tsv') do (
+    set SUB_LINE=%%A %%B
 
-    echo Checking: !SUB_NAME! (!SUB_ID!)
-    az account set --subscription "!SUB_ID!" >nul 2>&1
+    REM Extract subscription name and ID from line
+    for /f "tokens=1,* delims=	" %%C in ("!SUB_LINE!") do (
+        set SUB_NAME=%%C
+        set SUB_ID=%%D
 
-    REM Check Azure Firewall count
-    for /f %%C in ('az network firewall list --query "length(@)" -o tsv') do (
-        set FW_COUNT=%%C
-    )
+        REM Trim double quotes
+        set SUB_NAME=!SUB_NAME:"=!
+        set SUB_ID=!SUB_ID:"=!
 
-    if "!FW_COUNT!"=="0" (
-        echo !SUB_NAME!,!SUB_ID!,NO >> %OUTPUT%
-        echo Result: NO
-    ) else (
-        echo !SUB_NAME!,!SUB_ID!,YES >> %OUTPUT%
-        echo Result: YES
+        echo Checking: !SUB_NAME! (!SUB_ID!)
+        az account set --subscription "!SUB_ID!" >nul 2>&1
+
+        REM Default to NO
+        set FW_DEPLOYED=NO
+
+        REM Count number of firewalls
+        for /f %%E in ('az network firewall list --query "length(@)" -o tsv 2^>nul') do (
+            if %%E GTR 0 (
+                set FW_DEPLOYED=YES
+            )
+        )
+
+        REM Output to CSV
+        echo !SUB_NAME!,!SUB_ID!,!FW_DEPLOYED! >> %OUTPUT%
+        echo Result: !FW_DEPLOYED!
+        echo --------------------------------------
     )
 )
 
 echo.
 echo ✅ Output written to %OUTPUT%
-endlocal
 pause
+endlocal
 
 
  How to Use:
