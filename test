@@ -1,48 +1,39 @@
 @echo off
 setlocal enabledelayedexpansion
 
-REM Output CSV file
-set "output=azure_firewall_status.csv"
-echo Subscription Name,Subscription ID,Firewall Deployed > "%output%"
+REM Define output CSV file
+set "OUTPUT=azure_firewall_status.csv"
+echo Subscription Name,Subscription ID,Firewall Deployed > "%OUTPUT%"
 
-REM Get all subscriptions
-for /f "delims=" %%s in ('az account list --query "[].{name:name, id:id}" -o tsv') do (
-    for /f "tokens=1,* delims=	" %%a in ("%%s") do (
-        set "subName=%%a"
-        set "subId=%%b"
-        call :processSubscription "!subName!" "!subId!"
+REM Loop through each subscription
+for /f "tokens=*" %%i in ('az account list --query "[].{name:name, id:id}" -o tsv') do (
+    for /f "tokens=1,2 delims=	" %%a in ("%%i") do (
+        set "SUB_NAME=%%a"
+        set "SUB_ID=%%b"
+
+        REM Set current subscription
+        call az account set --subscription "!SUB_ID!" >nul 2>&1
+
+        REM Default value
+        set "FIREWALL=NO"
+
+        REM Check if any firewalls exist
+        for /f %%c in ('az network firewall list --query "length(@)" -o tsv 2^>nul') do (
+            if %%c GTR 0 (
+                set "FIREWALL=YES"
+            )
+        )
+
+        REM Write to output
+        echo !SUB_NAME!,!SUB_ID!,!FIREWALL! >> "%OUTPUT%"
+        echo Checked: !SUB_NAME! - Firewall: !FIREWALL!
     )
 )
 
 echo.
-echo ✅ Output written to %output%
+echo ✅ Output written to %OUTPUT%
 pause
-exit /b
 
-:processSubscription
-setlocal
-set "subName=%~1"
-set "subId=%~2"
-
-REM Set the subscription context
-az account set --subscription "%subId%" >nul 2>&1
-
-REM Default value
-set "fwStatus=NO"
-
-REM Check if any Azure Firewalls exist
-for /f %%f in ('az network firewall list --query "length(@)" -o tsv 2^>nul') do (
-    if %%f GTR 0 (
-        set "fwStatus=YES"
-    )
-)
-
-REM Write to CSV
-echo %subName%,%subId%,%fwStatus%>>"%output%"
-echo %subName% - Firewall: %fwStatus%
-
-endlocal
-exit /b
 
 
 
