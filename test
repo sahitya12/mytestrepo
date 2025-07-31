@@ -1,47 +1,49 @@
 @echo off
 setlocal enabledelayedexpansion
 
-REM Output file
-set OUTPUT=azure_firewall_status.csv
-echo Subscription Name,Subscription ID,Firewall Deployed > %OUTPUT%
+REM Output CSV file
+set "output=azure_firewall_status.csv"
+echo Subscription Name,Subscription ID,Firewall Deployed > "%output%"
 
-REM Get list of subscriptions (Name and ID)
-for /f "tokens=1* delims=:" %%A in ('az account list --query "[].{Name:name, Id:id}" -o tsv') do (
-    set SUB_LINE=%%A %%B
-
-    REM Extract subscription name and ID from line
-    for /f "tokens=1,* delims=	" %%C in ("!SUB_LINE!") do (
-        set SUB_NAME=%%C
-        set SUB_ID=%%D
-
-        REM Trim double quotes
-        set SUB_NAME=!SUB_NAME:"=!
-        set SUB_ID=!SUB_ID:"=!
-
-        echo Checking: !SUB_NAME! (!SUB_ID!)
-        az account set --subscription "!SUB_ID!" >nul 2>&1
-
-        REM Default to NO
-        set FW_DEPLOYED=NO
-
-        REM Count number of firewalls
-        for /f %%E in ('az network firewall list --query "length(@)" -o tsv 2^>nul') do (
-            if %%E GTR 0 (
-                set FW_DEPLOYED=YES
-            )
-        )
-
-        REM Output to CSV
-        echo !SUB_NAME!,!SUB_ID!,!FW_DEPLOYED! >> %OUTPUT%
-        echo Result: !FW_DEPLOYED!
-        echo --------------------------------------
+REM Get all subscriptions
+for /f "delims=" %%s in ('az account list --query "[].{name:name, id:id}" -o tsv') do (
+    for /f "tokens=1,* delims=	" %%a in ("%%s") do (
+        set "subName=%%a"
+        set "subId=%%b"
+        call :processSubscription "!subName!" "!subId!"
     )
 )
 
 echo.
-echo ✅ Output written to %OUTPUT%
+echo ✅ Output written to %output%
 pause
+exit /b
+
+:processSubscription
+setlocal
+set "subName=%~1"
+set "subId=%~2"
+
+REM Set the subscription context
+az account set --subscription "%subId%" >nul 2>&1
+
+REM Default value
+set "fwStatus=NO"
+
+REM Check if any Azure Firewalls exist
+for /f %%f in ('az network firewall list --query "length(@)" -o tsv 2^>nul') do (
+    if %%f GTR 0 (
+        set "fwStatus=YES"
+    )
+)
+
+REM Write to CSV
+echo %subName%,%subId%,%fwStatus%>>"%output%"
+echo %subName% - Firewall: %fwStatus%
+
 endlocal
+exit /b
+
 
 
  How to Use:
