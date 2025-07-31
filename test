@@ -1,0 +1,42 @@
+@echo off
+setlocal enabledelayedexpansion
+
+set OUTPUT=azure_firewall_status.csv
+echo Subscription Name,Subscription ID,Firewall Deployed > %OUTPUT%
+
+REM Get list of subscriptions
+for /f "skip=1 tokens=1,2 delims=," %%A in ('az account list --query "[].{Name:name, Id:id}" -o tsv') do (
+    set SUB_NAME=%%A
+    set SUB_ID=%%B
+
+    echo Checking: !SUB_NAME! (!SUB_ID!)
+    az account set --subscription "!SUB_ID!" >nul 2>&1
+
+    REM Check Azure Firewall count
+    for /f %%C in ('az network firewall list --query "length(@)" -o tsv') do (
+        set FW_COUNT=%%C
+    )
+
+    if "!FW_COUNT!"=="0" (
+        echo !SUB_NAME!,!SUB_ID!,NO >> %OUTPUT%
+        echo Result: NO
+    ) else (
+        echo !SUB_NAME!,!SUB_ID!,YES >> %OUTPUT%
+        echo Result: YES
+    )
+)
+
+echo.
+echo ✅ Output written to %OUTPUT%
+endlocal
+pause
+
+
+ How to Use:
+Open Notepad and paste the script.
+
+Save it as check_firewall.cmd.
+
+Right-click the file and choose "Run as Administrator" (if you have permission).
+
+Make sure az CLI is installed and you're already logged in via az login.
