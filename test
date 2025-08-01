@@ -1,4 +1,4 @@
-# Output CSV file
+# Output file
 $outputFile = "adls_ip_whitelist_report.csv"
 "Subscription Name,Subscription ID,Resource Group,Storage Account,IP Whitelist Count" | Out-File -FilePath $outputFile -Encoding utf8
 
@@ -21,22 +21,28 @@ foreach ($sub in $subscriptions) {
         $saName = $saParts[0]
         $rgName = $saParts[1]
 
-        # Filter only accounts with "adls" in the name (case-insensitive)
+        # Filter only accounts with "adls" in name
         if ($saName -match "adls") {
 
-            # Get full storage account properties
-            $accountInfo = az storage account show --name $saName --resource-group $rgName --query "networkRuleSet.ipRules" -o json 2>$null
+            # Get full networkRuleSet
+            $networkRules = az storage account show --name $saName --resource-group $rgName `
+                --query "networkRuleSet" -o json 2>$null | ConvertFrom-Json
 
-            # Convert JSON to array
-            $ipList = @()
-            if ($accountInfo) {
-                $ipList = $accountInfo | ConvertFrom-Json
+            # Skip if no rule set returned (null)
+            if (-not $networkRules) {
+                continue
             }
 
-            # Count IPs if list exists
+            # Skip if public access is allowed
+            if ($networkRules.defaultAction -eq "Allow") {
+                Write-Output "SKIPPED (public access): $saName"
+                continue
+            }
+
+            # Count IP whitelist entries
             $ipCount = 0
-            if ($ipList) {
-                $ipCount = $ipList.Count
+            if ($networkRules.ipRules) {
+                $ipCount = $networkRules.ipRules.Count
             }
 
             # Write to CSV
@@ -47,6 +53,7 @@ foreach ($sub in $subscriptions) {
 }
 
 Write-Output "`n✅ Report generated: $outputFile"
+
 
 
 
