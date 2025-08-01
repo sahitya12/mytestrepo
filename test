@@ -1,47 +1,45 @@
-@echo off
-setlocal enabledelayedexpansion
+#!/bin/bash
 
-REM Define output CSV file
-set "OUTPUT=azure_firewall_status.csv"
-echo Subscription Name,Subscription ID,Firewall Deployed > "%OUTPUT%"
+# Output file
+output_file="adls_ip_whitelist_report.csv"
 
-REM Loop through each subscription
-for /f "tokens=*" %%i in ('az account list --query "[].{name:name, id:id}" -o tsv') do (
-    for /f "tokens=1,2 delims=	" %%a in ("%%i") do (
-        set "SUB_NAME=%%a"
-        set "SUB_ID=%%b"
+# Write CSV header
+echo "Subscription Name,Subscription ID,Resource Group,Storage Account,IP Whitelist Count" > "$output_file"
 
-        REM Set current subscription
-        call az account set --subscription "!SUB_ID!" >nul 2>&1
+# Get all subscriptions
+az account list --query "[].{Name:name, Id:id}" -o tsv |
+while IFS=$'\t' read -r subName subId; do
+    az account set --subscription "$subId" --only-show-errors
 
-        REM Default value
-        set "FIREWALL=NO"
+    # Get all storage accounts where name contains 'adls'
+    az storage account list \
+        --query "[?contains(to_lower(name), 'adls')].{Name:name, ResourceGroup:resourceGroup}" \
+        -o tsv |
+    while IFS=$'\t' read -r saName rgName; do
+        # Get count of IP rules
+        ip_count=$(az storage account show \
+            --name "$saName" \
+            --resource-group "$rgName" \
+            --query "length(networkRuleSet.ipRules)" \
+            -o tsv 2>/dev/null)
 
-        REM Check if any firewalls exist
-        for /f %%c in ('az network firewall list --query "length(@)" -o tsv 2^>nul') do (
-            if %%c GTR 0 (
-                set "FIREWALL=YES"
-            )
-        )
+        # Handle null
+        if [ -z "$ip_count" ]; then ip_count=0; fi
 
-        REM Write to output
-        echo !SUB_NAME!,!SUB_ID!,!FIREWALL! >> "%OUTPUT%"
-        echo Checked: !SUB_NAME! - Firewall: !FIREWALL!
-    )
-)
+        # Append to CSV
+        echo "\"$subName\",\"$subId\",\"$rgName\",\"$saName\",$ip_count" >> "$output_file"
+        echo "Checked: $subName / $saName -> $ip_count IP(s)"
+    done
+done
 
-echo.
-echo ✅ Output written to %OUTPUT%
-pause
+echo ""
+echo "✅ Report generated: $output_file"
 
 
 
 
- How to Use:
-Open Notepad and paste the script.
+adls_ip_whitelist_report.sh
 
-Save it as check_firewall.cmd.
+chmod +x adls_ip_whitelist_report.sh
 
-Right-click the file and choose "Run as Administrator" (if you have permission).
-
-Make sure az CLI is installed and you're already logged in via az login.
+./adls_ip_whitelist_report.sh
