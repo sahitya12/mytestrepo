@@ -1,45 +1,47 @@
-#!/bin/bash
-
 # Output file
-output_file="adls_ip_whitelist_report.csv"
-
-# Write CSV header
-echo "Subscription Name,Subscription ID,Resource Group,Storage Account,IP Whitelist Count" > "$output_file"
+$outputFile = "adls_ip_whitelist_report.csv"
+"Subscription Name,Subscription ID,Resource Group,Storage Account,IP Whitelist Count" | Out-File -FilePath $outputFile -Encoding utf8
 
 # Get all subscriptions
-az account list --query "[].{Name:name, Id:id}" -o tsv |
-while IFS=$'\t' read -r subName subId; do
-    az account set --subscription "$subId" --only-show-errors
+$subscriptions = az account list --query "[].{name:name, id:id}" -o tsv
 
-    # Get all storage accounts where name contains 'adls'
-    az storage account list \
-        --query "[?contains(to_lower(name), 'adls')].{Name:name, ResourceGroup:resourceGroup}" \
-        -o tsv |
-    while IFS=$'\t' read -r saName rgName; do
-        # Get count of IP rules
-        ip_count=$(az storage account show \
-            --name "$saName" \
-            --resource-group "$rgName" \
-            --query "length(networkRuleSet.ipRules)" \
-            -o tsv 2>/dev/null)
+foreach ($sub in $subscriptions) {
+    $parts = $sub -split "`t"
+    $subName = $parts[0]
+    $subId = $parts[1]
 
-        # Handle null
-        if [ -z "$ip_count" ]; then ip_count=0; fi
+    # Set the current subscription
+    az account set --subscription $subId | Out-Null
+
+    # Get all storage accounts with 'adls' in the name
+    $storageAccounts = az storage account list `
+        --query "[?contains(to_lower(name), 'adls')].{name:name, rg:resourceGroup}" -o tsv
+
+    foreach ($sa in $storageAccounts) {
+        $saParts = $sa -split "`t"
+        $saName = $saParts[0]
+        $rgName = $saParts[1]
+
+        # Get number of whitelisted IPs
+        $ipCount = az storage account show `
+            --name $saName `
+            --resource-group $rgName `
+            --query "length(networkRuleSet.ipRules)" `
+            -o tsv 2>$null
+
+        if (-not $ipCount) {
+            $ipCount = 0
+        }
 
         # Append to CSV
-        echo "\"$subName\",\"$subId\",\"$rgName\",\"$saName\",$ip_count" >> "$output_file"
-        echo "Checked: $subName / $saName -> $ip_count IP(s)"
-    done
-done
+        "$subName,$subId,$rgName,$saName,$ipCount" | Out-File -Append -FilePath $outputFile
+        Write-Output "Checked: $subName / $saName -> $ipCount IP(s)"
+    }
+}
 
-echo ""
-echo "✅ Report generated: $output_file"
-
+Write-Output "`n✅ Report generated: $outputFile"
 
 
 
-adls_ip_whitelist_report.sh
-
-chmod +x adls_ip_whitelist_report.sh
-
-./adls_ip_whitelist_report.sh
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\adls-ip-report.ps1
