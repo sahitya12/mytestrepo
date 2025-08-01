@@ -1,4 +1,4 @@
-# Output file
+# Output CSV file
 $outputFile = "adls_ip_whitelist_report.csv"
 "Subscription Name,Subscription ID,Resource Group,Storage Account,IP Whitelist Count" | Out-File -FilePath $outputFile -Encoding utf8
 
@@ -13,7 +13,7 @@ foreach ($sub in $subscriptions) {
     # Set current subscription
     az account set --subscription $subId | Out-Null
 
-    # Get all storage accounts (no filter here)
+    # Get all storage accounts
     $storageAccounts = az storage account list --query "[].{name:name, rg:resourceGroup}" -o tsv
 
     foreach ($sa in $storageAccounts) {
@@ -21,20 +21,25 @@ foreach ($sub in $subscriptions) {
         $saName = $saParts[0]
         $rgName = $saParts[1]
 
-        # Only include storage accounts with "adls" in the name (case-insensitive)
+        # Filter only accounts with "adls" in the name (case-insensitive)
         if ($saName -match "adls") {
-            # Get count of IP rules
-            $ipCount = az storage account show `
-                --name $saName `
-                --resource-group $rgName `
-                --query "length(networkRuleSet.ipRules)" `
-                -o tsv 2>$null
 
-            if (-not $ipCount) {
-                $ipCount = 0
+            # Get full storage account properties
+            $accountInfo = az storage account show --name $saName --resource-group $rgName --query "networkRuleSet.ipRules" -o json 2>$null
+
+            # Convert JSON to array
+            $ipList = @()
+            if ($accountInfo) {
+                $ipList = $accountInfo | ConvertFrom-Json
             }
 
-            # Output to CSV
+            # Count IPs if list exists
+            $ipCount = 0
+            if ($ipList) {
+                $ipCount = $ipList.Count
+            }
+
+            # Write to CSV
             "$subName,$subId,$rgName,$saName,$ipCount" | Out-File -Append -FilePath $outputFile
             Write-Output "Checked: $subName / $saName -> $ipCount IP(s)"
         }
@@ -42,6 +47,7 @@ foreach ($sub in $subscriptions) {
 }
 
 Write-Output "`n✅ Report generated: $outputFile"
+
 
 
 
