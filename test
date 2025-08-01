@@ -10,36 +10,39 @@ foreach ($sub in $subscriptions) {
     $subName = $parts[0]
     $subId = $parts[1]
 
-    # Set the current subscription
+    # Set current subscription
     az account set --subscription $subId | Out-Null
 
-    # Get all storage accounts with 'adls' in the name
-    $storageAccounts = az storage account list `
-        --query "[?contains(to_lower(name), 'adls')].{name:name, rg:resourceGroup}" -o tsv
+    # Get all storage accounts (no filter here)
+    $storageAccounts = az storage account list --query "[].{name:name, rg:resourceGroup}" -o tsv
 
     foreach ($sa in $storageAccounts) {
         $saParts = $sa -split "`t"
         $saName = $saParts[0]
         $rgName = $saParts[1]
 
-        # Get number of whitelisted IPs
-        $ipCount = az storage account show `
-            --name $saName `
-            --resource-group $rgName `
-            --query "length(networkRuleSet.ipRules)" `
-            -o tsv 2>$null
+        # Only include storage accounts with "adls" in the name (case-insensitive)
+        if ($saName -match "adls") {
+            # Get count of IP rules
+            $ipCount = az storage account show `
+                --name $saName `
+                --resource-group $rgName `
+                --query "length(networkRuleSet.ipRules)" `
+                -o tsv 2>$null
 
-        if (-not $ipCount) {
-            $ipCount = 0
+            if (-not $ipCount) {
+                $ipCount = 0
+            }
+
+            # Output to CSV
+            "$subName,$subId,$rgName,$saName,$ipCount" | Out-File -Append -FilePath $outputFile
+            Write-Output "Checked: $subName / $saName -> $ipCount IP(s)"
         }
-
-        # Append to CSV
-        "$subName,$subId,$rgName,$saName,$ipCount" | Out-File -Append -FilePath $outputFile
-        Write-Output "Checked: $subName / $saName -> $ipCount IP(s)"
     }
 }
 
 Write-Output "`n✅ Report generated: $outputFile"
+
 
 
 
