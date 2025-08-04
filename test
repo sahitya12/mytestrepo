@@ -33,4 +33,6 @@ Write-Output "`n✅ Route table report generated: $outputFile"
 
 
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\adls-ip-report.ps1
+.\export-route-tables.ps1
+
+
