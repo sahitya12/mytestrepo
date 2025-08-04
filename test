@@ -22,22 +22,29 @@ foreach ($sub in $subscriptions) {
         $rgName = $rtParts[1]
 
         # Get routes in the route table
-        $routesJson = az network route-table route list --route-table-name $rtName --resource-group $rgName -o json
-        $routes = $routesJson | ConvertFrom-Json
+        $routesJson = az network route-table route list `
+            --route-table-name $rtName `
+            --resource-group $rgName `
+            -o json
 
-        foreach ($route in $routes) {
-            $routeName = $route.name
-            $addressPrefix = $route.addressPrefix
-            $nextHopType = $route.nextHopType
-            $nextHopIp = if ($null -ne $route.nextHopIpAddress) { $route.nextHopIpAddress } else { "N/A" }
+        if ($routesJson) {
+            $routes = $routesJson | ConvertFrom-Json
 
-            # Append to CSV
-            "$subName,$subId,$rtName,$rgName,$routeName,$addressPrefix,$nextHopType,$nextHopIp" | Out-File -Append -FilePath $outputFile
+            foreach ($route in $routes) {
+                $routeName = $route.name
+                $addressPrefix = $route.addressPrefix
+                $nextHopType = $route.nextHopType
+                $nextHopIp = if ($null -ne $route.nextHopIpAddress) { $route.nextHopIpAddress } else { "N/A" }
+
+                # Append to CSV
+                "$subName,$subId,$rtName,$rgName,$routeName,$addressPrefix,$nextHopType,$nextHopIp" | Out-File -Append -FilePath $outputFile
+            }
         }
     }
 }
 
 Write-Output "`n✅ Route table report generated: $outputFile"
+
 
 
 
