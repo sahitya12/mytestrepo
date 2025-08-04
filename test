@@ -1,58 +1,31 @@
-# Output file
-$outputFile = "adls_ip_whitelist_report.csv"
-"Subscription Name,Subscription ID,Resource Group,Storage Account,IP Whitelist Count" | Out-File -FilePath $outputFile -Encoding utf8
+# Output CSV file
+$outputFile = "route_table_report.csv"
+"RouteTableName,ResourceGroup,RouteName,AddressPrefix,NextHopType,NextHopIpAddress" | Out-File -FilePath $outputFile -Encoding utf8
 
-# Get all subscriptions
-$subscriptions = az account list --query "[].{name:name, id:id}" -o tsv
+# Get all route tables in the current subscription
+$routeTables = az network route-table list --query "[].{name:name, rg:resourceGroup}" -o tsv
 
-foreach ($sub in $subscriptions) {
-    $parts = $sub -split "`t"
-    $subName = $parts[0]
-    $subId = $parts[1]
+foreach ($rt in $routeTables) {
+    $parts = $rt -split "`t"
+    $rtName = $parts[0]
+    $rgName = $parts[1]
 
-    # Set current subscription
-    az account set --subscription $subId | Out-Null
+    # Get routes in the route table
+    $routesJson = az network route-table route list --route-table-name $rtName --resource-group $rgName -o json
+    $routes = $routesJson | ConvertFrom-Json
 
-    # Get all storage accounts
-    $storageAccounts = az storage account list --query "[].{name:name, rg:resourceGroup}" -o tsv
+    foreach ($route in $routes) {
+        $routeName = $route.name
+        $addressPrefix = $route.addressPrefix
+        $nextHopType = $route.nextHopType
+        $nextHopIp = if ($null -ne $route.nextHopIpAddress) { $route.nextHopIpAddress } else { "N/A" }
 
-    foreach ($sa in $storageAccounts) {
-        $saParts = $sa -split "`t"
-        $saName = $saParts[0]
-        $rgName = $saParts[1]
-
-        # Filter only accounts with "adls" in name
-        if ($saName -match "adls") {
-
-            # Get full networkRuleSet
-            $networkRules = az storage account show --name $saName --resource-group $rgName `
-                --query "networkRuleSet" -o json 2>$null | ConvertFrom-Json
-
-            # Skip if no rule set returned (null)
-            if (-not $networkRules) {
-                continue
-            }
-
-            # Skip if public access is allowed
-            if ($networkRules.defaultAction -eq "Allow") {
-                Write-Output "SKIPPED (public access): $saName"
-                continue
-            }
-
-            # Count IP whitelist entries
-            $ipCount = 0
-            if ($networkRules.ipRules) {
-                $ipCount = $networkRules.ipRules.Count
-            }
-
-            # Write to CSV
-            "$subName,$subId,$rgName,$saName,$ipCount" | Out-File -Append -FilePath $outputFile
-            Write-Output "Checked: $subName / $saName -> $ipCount IP(s)"
-        }
+        "$rtName,$rgName,$routeName,$addressPrefix,$nextHopType,$nextHopIp" | Out-File -Append -FilePath $outputFile
     }
 }
 
-Write-Output "`n✅ Report generated: $outputFile"
+Write-Output "`n✅ Route table report generated: $outputFile"
+
 
 
 
