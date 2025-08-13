@@ -1,0 +1,50 @@
+parameters:
+  - name: displayName
+    type: string
+  - name: scriptPath
+    type: string
+  - name: scriptArgs
+    type: string
+    default: ''
+  - name: artifactFolder
+    type: string
+  - name: manual
+    type: boolean
+    default: false
+  - name: envVars
+    type: object
+    default: {}
+
+jobs:
+- job: ${{ replace(parameters.displayName,' ','_') }}
+  displayName: ${{ parameters.displayName }}
+  steps:
+  - checkout: self
+    persistCredentials: true
+    clean: false
+
+  - ${{ if eq(parameters.manual, true) }}:
+    - task: ManualValidation@0
+      displayName: "Approve: ${{ parameters.displayName }}"
+      inputs:
+        instructions: "Approve to run this sanity check"
+        onTimeout: 'reject'
+        timeout: '0'
+
+  - task: PowerShell@2
+    displayName: "Run: ${{ parameters.displayName }}"
+    inputs:
+      targetType: filePath
+      filePath: ${{ parameters.scriptPath }}
+      arguments: ${{ parameters.scriptArgs }}
+      pwsh: true
+    env:
+      ${{ each pair in parameters.envVars }}:
+        ${{ pair.key }}: ${{ pair.value }}
+
+  - task: PublishBuildArtifacts@1
+    displayName: "Publish ${{ parameters.artifactFolder }} artifacts"
+    inputs:
+      PathtoPublish: '$(System.DefaultWorkingDirectory)/Modernization_Terraform/sanitychecks/${{ parameters.artifactFolder }}'
+      ArtifactName: '${{ parameters.artifactFolder }}'
+      publishLocation: 'Container'
