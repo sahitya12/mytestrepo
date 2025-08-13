@@ -1,0 +1,5 @@
+$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Local Code Signing" -CertStoreLocation Cert:\CurrentUser\My
+$src = "Cert:\CurrentUser\My\$($cert.Thumbprint)"
+$dst = "Cert:\CurrentUser\TrustedPublisher"
+Copy-Item $src $dst
+Set-AuthenticodeSignature -FilePath .\KeyVaultScan.ps1 -Certificate $cert
