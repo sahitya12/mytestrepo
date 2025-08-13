@@ -1,23 +1,23 @@
 <# ====================== CONFIGURE THESE VALUES ====================== #>
 
-# Excel path (script auto-detects sheet & header row)
+# Excel file path (.xlsx/.xlsm), with worksheet "KVSecrets" and column "SECRET_NAME"
 $FilePath  = "C:\path\to\resource_sanitychecks.xlsx"
 
 # Custodian suffix used in subscription names (e.g., CSM -> matches *_ADHCSM)
 $adh_group = "CSM"
 
-# Output directory (leave blank to create 'kv-scan-local' beside the Excel)
+# Output directory (leave blank to create 'kv-scan-local' next to the Excel file)
 $OutputDir = ""
 
 # Include raw secret values in outputs? ($true = include, $false = mask)
 $IncludeSecretValues = $true
 
-# --- Service Principal credentials for SPN login ---
+# --- Service Principal (SPN) credentials for Azure login ---
+$TenantId     = "<tenant-guid>"
 $ClientId     = "<appId-guid>"
 $ClientSecret = "<sp-secret>"
-$TenantId     = "<tenant-guid>"
 
-# Optional CLI login too (not required for this script)
+# Also log in Azure CLI? (not required for this script)
 $AlsoAzCliLogin = $false
 
 <# ========================= DO NOT EDIT BELOW ======================== #>
@@ -33,7 +33,7 @@ if (-not (Test-Path -LiteralPath $FilePath)) { throw "Workbook not found at: $Fi
 
 $ext = [IO.Path]::GetExtension($FilePath)
 if ($ext -notin @(".xlsx",".xlsm")) {
-    throw "Unsupported Excel format '$ext'. Please save as .xlsx or .xlsm (ImportExcel cannot read .xls/.xlx)."
+    throw "Unsupported Excel format '$ext'. Please save as .xlsx or .xlsm."
 }
 $FilePath = (Resolve-Path -LiteralPath $FilePath).Path
 
@@ -63,104 +63,32 @@ if ($AlsoAzCliLogin) {
     catch { Write-Warning "az login failed: $($_.Exception.Message)" }
 }
 
-# ---------------- Robust sheet & header detection ----------------
-function Normalize([string]$s){ return ($s -replace '\s+',' ' ).Trim().ToUpperInvariant() }
+# ---------------- Load secrets from Excel (fixed worksheet & column) ----------------
+$WorksheetName    = 'KVSecrets'
+$SecretColumnName = 'SECRET_NAME'   # exact header expected in row 1
 
-# candidates we accept for the header text:
-$AcceptedHeaderPatterns = @(
-    '^SECRET NAME$',
-    '^SECRET\s*NAME$',
-    '^SECRET_NAME$',
-    '^SECRET$',
-    '^SECRET\s*NAMES?$',
-    '^SECRETNAME$',
-    '^KV\s*SECRET\s*NAME$',
-    '^KEYVAULTS?\s*SECRETS?$'   # last-resort broad header
-)
-
-$PreferredSheets = @('KVSecrets','KeyVaults Secrets','KeyVaults_Secrets','KeyVaultSecrets')
-$WorksheetName   = $null
-$HeaderRow       = $null
-$SecretColumnName = $null
-
-# Search up to first 40 rows for a matching header
-function Try-FindHeader {
-    param([string]$SheetName)
-    for ($r=1; $r -le 40; $r++) {
-        try {
-            $probe = Import-Excel -Path $FilePath -WorksheetName $SheetName -StartRow $r -EndRow $r -ErrorAction Stop
-            if (-not $probe) { continue }
-            $props = $probe.psobject.Properties.Name
-            foreach ($p in $props) {
-                $np = Normalize $p
-                foreach ($pat in $AcceptedHeaderPatterns) {
-                    if ($np -match $pat) {
-                        return @{ Found = $true; Row = $r; ColName = $p }
-                    }
-                }
-            }
-        } catch { }
-    }
-    return @{ Found = $false }
-}
-
-# 1) Try preferred sheets
-foreach ($ws in $PreferredSheets) {
-    $res = Try-FindHeader -SheetName $ws
-    if ($res.Found) { $WorksheetName = $ws; $HeaderRow = $res.Row; $SecretColumnName = $res.ColName; break }
-}
-
-# 2) Fall back to scanning all sheets
-if (-not $WorksheetName) {
-    $info = Get-ExcelSheetInfo -Path $FilePath
-    foreach ($entry in $info) {
-        $res = Try-FindHeader -SheetName $entry.Name
-        if ($res.Found) { $WorksheetName = $entry.Name; $HeaderRow = $res.Row; $SecretColumnName = $res.ColName; break }
-    }
-}
-
-if (-not $WorksheetName -or -not $HeaderRow -or -not $SecretColumnName) {
-    # Print columns we saw in row 1 for easier debugging
-    try {
-        $testSheet = ($PreferredSheets + (Get-ExcelSheetInfo -Path $FilePath | Select-Object -ExpandProperty Name)) | Select-Object -Unique | Select-Object -First 1
-        $hdr1 = Import-Excel -Path $FilePath -WorksheetName $testSheet -StartRow 1 -EndRow 1 -ErrorAction SilentlyContinue
-        $cols = if ($hdr1) { $hdr1.psobject.Properties.Name -join ', ' } else { "<no visible header in first row>" }
-    } catch { $cols = "<unreadable>" }
-    throw "No worksheet/header row found containing a 'SECRET NAME' column (case/space-insensitive).
-Checked first 40 rows of each sheet.
-First-row columns on a sample sheet: $cols"
-}
-
-# Load data using the discovered header row
 try {
-    $data = Import-Excel -Path $FilePath -WorksheetName $WorksheetName -StartRow $HeaderRow -ErrorAction Stop
+    $data = Import-Excel -Path $FilePath -WorksheetName $WorksheetName -ErrorAction Stop
 } catch {
-    throw "Failed to read sheet '$WorksheetName' (header at row $HeaderRow): $($_.Exception.Message)"
+    throw "Failed to read sheet '$WorksheetName' from '$FilePath': $($_.Exception.Message)"
 }
 
-# Extract secret names (cast to string, trim, de-dup)
-$SecretNames =
-    $data |
-    ForEach-Object {
-        $v = $_.$SecretColumnName
-        if ($null -ne $v) { $v.ToString().Trim() } else { $null }
-    } |
-    Where-Object { $_ } |
+if (-not ($data | Get-Member -Name $SecretColumnName -MemberType NoteProperty)) {
+    $cols = if ($data) { ($data[0].psobject.Properties.Name -join ', ') } else { "<no columns>" }
+    throw "Column '$SecretColumnName' not found in sheet '$WorksheetName'. Columns seen: $cols"
+}
+
+$SecretNames = $data.$SecretColumnName |
+    Where-Object { $_ -and $_.ToString().Trim() } |
+    ForEach-Object { $_.ToString().Trim() } |
     Sort-Object -Unique
 
 if (-not $SecretNames -or $SecretNames.Count -eq 0) {
-    $cols = ($data[0].psobject.Properties.Name -join ', ')
-    throw "Found header at row $HeaderRow (column '$SecretColumnName'), but no secret names under it.
-Columns in that sheet: $cols"
+    throw "No secret names found under column '$SecretColumnName' in sheet '$WorksheetName'."
 }
+Write-Host "Loaded $($SecretNames.Count) secret(s) from '$WorksheetName' ('$SecretColumnName')." -ForegroundColor Cyan
 
-# Diagnostics
-Write-Host "Worksheet: $WorksheetName" -ForegroundColor Cyan
-Write-Host "HeaderRow: $HeaderRow" -ForegroundColor Cyan
-Write-Host "Secret column resolved to: '$SecretColumnName'" -ForegroundColor Cyan
-Write-Host "First secrets: $((($SecretNames | Select-Object -First 10) -join ', '))" -ForegroundColor DarkCyan
-
-# ---------------- Pick subscriptions (in THIS tenant) by name pattern *_ADH<adh_group> ----------------
+# ---------------- Pick subscriptions (THIS tenant) by pattern *_ADH<adh_group> ----------------
 $suffix = "_ADH$adh_group"
 $allSubs = Get-AzSubscription -TenantId $TenantId -ErrorAction Stop
 if (-not $allSubs) { throw "No subscriptions found in tenant $TenantId for the given SPN." }
