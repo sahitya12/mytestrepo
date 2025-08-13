@@ -1,8 +1,11 @@
 param(
-    [Parameter(Mandatory=$true)][string]$adh_group,             # e.g., ADHCSM (custodian suffix in sub name)
-    [Parameter(Mandatory=$true)][ValidateSet('prd','nonprd')][string]$adh_subscription_type,
-    [string]$FilePath,                                          # resource_sanitychecks.xlx (or .xlsx/.xls)
-    [bool]$IncludeSecretValues = $true
+    [Parameter(Mandatory=$true)]
+    [string]$adh_group,                 # e.g. CSM, HDD, HGS  (we will search *_ADH<adh_group>)
+    [Parameter(Mandatory=$true)]
+    [ValidateSet('prd','nonprd')]
+    [string]$adh_subscription_type,     # prd | nonprd (nonprd = dev only)
+    [string]$FilePath,                  # defaults to resource_sanitychecks.xlsx under this folder
+    [bool]$IncludeSecretValues = $true  # set false to mask values in CSV
 )
 
 # ---------------- Modules ----------------
@@ -16,35 +19,33 @@ if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
 }
 Import-Module ImportExcel -ErrorAction Stop
 
-# ---------------- Inputs & Environment ----------------
-# SPN creds are provided from ADO Variable Groups via env vars
-#   modernization_terraform_subscription_details
-#   test_modernization_terraform_subscription_details
-#   modernization_tfstate_backend_details
+# ---------------- Inputs & Env from Variable Groups ----------------
+# Expect these to be linked via ADO variable groups:
+# modernization_terraform_subscription_details, test_modernization_terraform_subscription_details, modernization_tfstate_backend_details
 $clientId     = $env:client_id
 $clientSecret = $env:client_secret
-
 if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($clientSecret)) {
     throw "Missing Service Principal credentials (client_id / client_secret) from variable groups."
 }
 
-# Base folder for IO
+# Base paths
 $BasePath = Join-Path $env:System_DefaultWorkingDirectory 'Modernization_Terraform/sanitychecks'
 if (-not (Test-Path $BasePath)) { throw "Base path not found: $BasePath" }
 
-# Resolve workbook path:
-if (-not $FilePath) { $FilePath = Join-Path $BasePath 'resource_sanitychecks.xlx' }
+# Workbook path (default to .xlsx in same folder). We’ll also accept .xls/.xlx silently.
+if (-not $FilePath) { $FilePath = Join-Path $BasePath 'resource_sanitychecks.xlsx' }
 function Resolve-Workbook([string]$p) {
     if (Test-Path -LiteralPath $p) { return $p }
-    $alt = [IO.Path]::ChangeExtension($p,'xlsx'); if (Test-Path -LiteralPath $alt) { return $alt }
-    $alt = [IO.Path]::ChangeExtension($p,'xls');  if (Test-Path -LiteralPath $alt) { return $alt }
-    throw "Workbook not found. Tried: $p / $( [IO.Path]::ChangeExtension($p,'xlsx') ) / $( [IO.Path]::ChangeExtension($p,'xls') )"
+    $alt1 = [IO.Path]::ChangeExtension($p,'xls');  if (Test-Path -LiteralPath $alt1) { return $alt1 }
+    $alt2 = [IO.Path]::ChangeExtension($p,'xlx');  if (Test-Path -LiteralPath $alt2) { return $alt2 }
+    throw "Workbook not found. Tried: $p / $alt1 / $alt2"
 }
 $ExcelPath = Resolve-Workbook -p $FilePath
 
-# ---------------- Read KV Secrets list ----------------
+# ---------------- Read KV Secrets from Excel ----------------
 $WorksheetName    = 'KVSecrets'
 $SecretColumnName = 'SECRET NAME'
+
 $data = Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName -ErrorAction Stop
 if (-not ($data | Get-Member -Name $SecretColumnName -MemberType NoteProperty)) {
     throw "Column '$SecretColumnName' not found in sheet '$WorksheetName'."
@@ -55,39 +56,36 @@ $SecretNames = $data.$SecretColumnName |
     Sort-Object -Unique
 if (-not $SecretNames) { throw "No secret names found in '$SecretColumnName'." }
 
-# ---------------- Auth (Tenant optional) ----------------
+# ---------------- Login (tenant NOT required by your request) ----------------
 $spCred = New-Object System.Management.Automation.PSCredential ($clientId, (ConvertTo-SecureString $clientSecret -AsPlainText -Force))
-
-# First try without tenant (your ask). If it fails and TENANT is provided, retry with it.
 try {
     Connect-AzAccount -ServicePrincipal -Credential $spCred -ErrorAction Stop | Out-Null
 } catch {
-    if ($env:tenant_id) {
-        Write-Warning "Retrying login using provided tenant_id..."
-        Connect-AzAccount -ServicePrincipal -Tenant $env:tenant_id -Credential $spCred -ErrorAction Stop | Out-Null
-    } else {
-        throw "Azure login failed and tenant_id not provided. $_"
-    }
+    # If your org requires tenant, set tenant_id in variable group and uncomment next two lines:
+    # $tenantId = $env:tenant_id
+    # if ($tenantId) { Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $spCred -ErrorAction Stop | Out-Null } else { throw }
+    throw
 }
 
-# ---------------- Pick Subscriptions based on naming convention ----------------
-# Examples expected:
-#   dev_azure_20921_ADHCSM
-#   prd_azure_20920_ADHCSM
+# ---------------- Pick subscriptions by name ----------------
+# Naming examples:
+#   dev_azure_20921_ADHCSM  (adh_group = CSM  -> suffix="_ADHCSM")
+#   prd_azure_20920_ADHHDD  (adh_group = HDD  -> suffix="_ADHHDD")
 $allSubs = Get-AzSubscription -ErrorAction Stop
-$patternSuffix = "_$adh_group"             # e.g., _ADHCSM
+$suffix  = "_ADH$adh_group"   # build required custodian suffix
 
 if ($adh_subscription_type -eq 'nonprd') {
-    # Only dev subscriptions (tst/stg are environments within dev sub, as per your note)
-    $subs = $allSubs | Where-Object { $_.Name -like "dev_*$patternSuffix" }
+    # Your rule: nonprd => dev subscription only (tst & stg live within dev)
+    $subs = $allSubs | Where-Object { $_.Name -like "dev_*$suffix" }
 } else {
-    # prd subscriptions
-    $subs = $allSubs | Where-Object { $_.Name -like "prd_*$patternSuffix" }
+    $subs = $allSubs | Where-Object { $_.Name -like "prd_*$suffix" }
 }
 
-if (-not $subs) { throw "No subscriptions matched: type=$adh_subscription_type, adh_group=$adh_group, pattern=*_*$patternSuffix" }
+if (-not $subs) {
+    throw "No subscriptions matched: adh_subscription_type='$adh_subscription_type', suffix='$suffix'. Example expected: dev_*$suffix or prd_*$suffix"
+}
 
-# ---------------- Helper: render value ----------------
+# ---------------- Helpers ----------------
 function Render-Value([string]$v, [bool]$include) {
     if ($include) { return $v }
     if ([string]::IsNullOrEmpty($v)) { return "" }
@@ -95,7 +93,7 @@ function Render-Value([string]$v, [bool]$include) {
     return "{0}{1}{2}" -f $v.Substring(0,2),'***masked***',$v.Substring($v.Length-2,2)
 }
 
-# ---------------- Scan subs & vaults ----------------
+# ---------------- Scan ----------------
 $results = New-Object System.Collections.Generic.List[object]
 
 foreach ($sub in $subs) {
@@ -111,7 +109,6 @@ foreach ($sub in $subs) {
     }
 
     if (-not $vaults -or $vaults.Count -eq 0) {
-        # KeyVaults missing in this subscription → produce rows per secret with reason
         foreach ($secName in $SecretNames) {
             $results.Add([pscustomobject]@{
                 Custodian        = $adh_group
@@ -167,7 +164,7 @@ foreach ($sub in $subs) {
     }
 }
 
-# ---------------- Output CSV (in same folder) ----------------
+# ---------------- Output CSV ----------------
 $outDir  = Join-Path $BasePath 'kv-scan'
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
 $ts      = (Get-Date).ToString('yyyyMMdd_HHmmss')
