@@ -5,14 +5,15 @@ pool: { vmImage: 'windows-latest' }
 parameters:
 - name: adh_group
   type: string
-  default: 'CSM'           # short code, e.g., CSM/HDD/HGS
+  default: 'Platform'            # short code, e.g., CSM/HDD/HGS
 - name: adh_subscription_type
   type: string
   default: 'nonprd'
   values: [ 'nonprd', 'prd' ]
 - name: filePath
   type: string
-  default: '$(System.DefaultWorkingDirectory)/Modernization_Terraform/sanitychecks/resource_sanitychecks.xlsx'
+  # IMPORTANT: repo-relative default; DO NOT use $(System.DefaultWorkingDirectory) here
+  default: 'Modernization_Terraform/sanitychecks/resource_sanitychecks.xlsx'
 - name: includeValues
   type: boolean
   default: true
@@ -27,10 +28,12 @@ variables:
 - group: modernization_tfstate_backend_details
 
 stages:
-- template: ./stages/kv-secrets.stage.yml
+# Note: path is relative to THIS file
+- template: stages/kv-secrets.stage.yml
   parameters:
     manual: ${{ parameters.manualKVSecrets }}
     adh_group: ${{ parameters.adh_group }}
     adh_subscription_type: ${{ parameters.adh_subscription_type }}
-    filePath: ${{ parameters.filePath }}
+    # Build absolute path only when passing to the script:
+    filePath: '$(System.DefaultWorkingDirectory)/${{ parameters.filePath }}'
     includeValues: ${{ parameters.includeValues }}
