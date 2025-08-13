@@ -1,60 +1,75 @@
-param(
-    # Excel file with sheet 'KVSecrets' and column 'SECRET NAME'
-    [Parameter(Mandatory = $true)][string]$FilePath,
+<# ====================== CONFIGURE THESE VALUES ====================== #>
 
-    # Short custodian code appearing in subscription names as a suffix: *_ADH<adh_group>
-    # e.g., CSM -> matches dev_..._ADHCSM and prd_..._ADHCSM
-    [Parameter(Mandatory = $true)][string]$adh_group,
+# Excel file path (sheet 'KVSecrets', column 'SECRET NAME')
+$FilePath  = "C:\path\to\resource_sanitychecks.xlsx"
 
-    # Optional: include raw secret values in CSV/HTML (set $false to mask)
-    [bool]$IncludeSecretValues = $true,
+# Short custodian suffix used in subscription names (e.g., CSM -> matches *_ADHCSM)
+$adh_group = "CSM"
 
-    # Optional: output folder (defaults next to your Excel file)
-    [string]$OutputDir
-)
+# Output directory (if blank, a 'kv-scan-local' folder will be created next to the Excel)
+$OutputDir = ""
 
-# ---------------- Modules ----------------
-if (-not (Get-Module -ListAvailable -Name Az)) {
-    Install-Module -Name Az -Force -AllowClobber -Scope CurrentUser -Confirm:$false
-}
-Import-Module Az -ErrorAction Stop
+# Include raw secret values in outputs? ($true = include, $false = mask)
+$IncludeSecretValues = $true
 
-if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
-    Install-Module -Name ImportExcel -Force -Scope CurrentUser -Confirm:$false
-}
-Import-Module ImportExcel -ErrorAction Stop
+# --- Service Principal credentials for SPN login ---
+$ClientId     = "<appId-guid>"
+$ClientSecret = "<sp-secret>"
+$TenantId     = "<tenant-guid>"
 
-# ---------------- Login check ----------------
-try {
-    $ctx = Get-AzContext -ErrorAction Stop
-    if (-not $ctx.Account) { throw "No Az PowerShell context" }
-} catch {
-    Write-Host "No Az PowerShell login detected. Launching interactive login window..." -ForegroundColor Yellow
-    # This will prompt you to choose an account/tenant if needed
-    Connect-AzAccount -ErrorAction Stop | Out-Null
-}
+# Also log in Azure CLI context? (usually not required) 
+$AlsoAzCliLogin = $false
 
-# ---------------- Resolve paths ----------------
-if (-not (Test-Path -LiteralPath $FilePath)) {
-    # Try common alternates if they passed without extension or with xlx/xls
-    $try = @(
-        $FilePath,
-        [IO.Path]::ChangeExtension($FilePath,'xlsx'),
-        [IO.Path]::ChangeExtension($FilePath,'xls'),
-        [IO.Path]::ChangeExtension($FilePath,'xlx')
-    ) | Select-Object -Unique
-    $found = $try | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-    if (-not $found) {
-        throw "Workbook not found. Tried:`n - " + ($try -join "`n - ")
+<# ========================= DO NOT EDIT BELOW ======================== #>
+
+# ---------------- Modules (import only) ----------------
+try { Import-Module Az -ErrorAction Stop }
+catch { throw "Az module not found. Install once: Install-Module Az -Scope CurrentUser" }
+
+try { Import-Module ImportExcel -ErrorAction Stop }
+catch { throw "ImportExcel module not found. Install once: Install-Module ImportExcel -Scope CurrentUser" }
+
+# ---------------- Validate & resolve input path ----------------
+if ([string]::IsNullOrWhiteSpace($FilePath)) { throw "FilePath is required and cannot be empty." }
+
+function Resolve-Workbook {
+    param([string]$p)
+    $candidates = @(
+        $p,
+        [IO.Path]::ChangeExtension($p,'xlsx'),
+        [IO.Path]::ChangeExtension($p,'xls'),
+        [IO.Path]::ChangeExtension($p,'xlx')
+    ) | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
+    foreach($c in $candidates){
+        if(Test-Path -LiteralPath $c){ return (Resolve-Path -LiteralPath $c).Path }
     }
-    $FilePath = $found
+    throw "Workbook not found. Tried:`n - $($candidates -join "`n - ")"
 }
+$FilePath = Resolve-Workbook -p $FilePath
 
-if (-not $OutputDir) {
+if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path -Path (Split-Path -Parent $FilePath) -ChildPath 'kv-scan-local'
 }
 if (-not (Test-Path -LiteralPath $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir | Out-Null
+}
+
+# ---------------- SPN login ----------------
+if ([string]::IsNullOrWhiteSpace($ClientId) -or [string]::IsNullOrWhiteSpace($ClientSecret) -or [string]::IsNullOrWhiteSpace($TenantId)) {
+    throw "ClientId / ClientSecret / TenantId must be set in the CONFIG section."
+}
+$secure = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
+$creds  = New-Object System.Management.Automation.PSCredential ($ClientId, $secure)
+
+try {
+    Connect-AzAccount -ServicePrincipal -Tenant $TenantId -Credential $creds -ErrorAction Stop | Out-Null
+} catch {
+    throw "Connect-AzAccount (SPN) failed: $($_.Exception.Message)"
+}
+
+if ($AlsoAzCliLogin) {
+    try { az login --service-principal -u $ClientId -p $ClientSecret --tenant $TenantId 1>$null }
+    catch { Write-Warning "az login failed: $($_.Exception.Message)" }
 }
 
 # ---------------- Load secrets from Excel ----------------
@@ -66,32 +81,21 @@ try {
 } catch {
     throw "Failed to read sheet '$WorksheetName' from '$FilePath': $($_.Exception.Message)"
 }
-
 if (-not ($data | Get-Member -Name $SecretColumnName -MemberType NoteProperty)) {
     throw "Column '$SecretColumnName' not found in sheet '$WorksheetName'."
 }
-
 $SecretNames = $data.$SecretColumnName |
     Where-Object { $_ -and $_.ToString().Trim() } |
     ForEach-Object { $_.ToString().Trim() } |
     Sort-Object -Unique
-
-if (-not $SecretNames -or $SecretNames.Count -eq 0) {
-    throw "No secret names found in column '$SecretColumnName'."
-}
-
+if (-not $SecretNames) { throw "No secret names found in column '$SecretColumnName'." }
 Write-Host "Loaded $($SecretNames.Count) secrets from '$WorksheetName'." -ForegroundColor Cyan
 
-# ---------------- Pick subscriptions by name ----------------
-# Matches ANY subscription ending with _ADH<adh_group> (case-insensitive), e.g. *_ADHCSM
+# ---------------- Pick subscriptions by name (ends with *_ADH<adh_group>) ----------------
 $suffix = "_ADH$adh_group"
 $allSubs = Get-AzSubscription -ErrorAction Stop
 $subs = $allSubs | Where-Object { $_.Name -like "*$suffix" }
-
-if (-not $subs) {
-    throw "No subscriptions matched '*$suffix'. Example expected: dev_...$suffix or prd_...$suffix"
-}
-
+if (-not $subs) { throw "No subscriptions matched '*$suffix'. Expected like: dev_...$suffix or prd_...$suffix" }
 Write-Host "Scanning $($subs.Count) subscription(s) matching '*$suffix'..." -ForegroundColor Cyan
 
 # ---------------- Helpers ----------------
@@ -111,9 +115,8 @@ foreach ($sub in $subs) {
     Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
 
     $vaults = @()
-    try {
-        $vaults = Get-AzKeyVault -ErrorAction Stop
-    } catch {
+    try { $vaults = Get-AzKeyVault -ErrorAction Stop }
+    catch {
         Write-Warning "  Could not list Key Vaults: $($_.Exception.Message)"
         $vaults = @()
     }
@@ -171,17 +174,16 @@ foreach ($sub in $subs) {
     }
 }
 
-# ---------------- Write CSV ----------------
+# ---------------- Outputs ----------------
 $ts = (Get-Date).ToString('yyyyMMdd_HHmmss')
 $csvPath = Join-Path $OutputDir "KV-Secret-Check-$($adh_group.ToUpper())-$ts.csv"
 
 $results |
   Sort-Object SubscriptionName, VaultName, SecretName |
   Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
-
 Write-Host "`nCSV saved: $csvPath" -ForegroundColor Cyan
 
-# ---------------- Write HTML (green/red) ----------------
+# HTML (green/red)
 $style = @"
 table { border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12px; }
 th, td { border: 1px solid #ddd; padding: 6px 8px; }
