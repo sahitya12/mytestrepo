@@ -1,155 +1,180 @@
 param(
-  # Pass in the workbook if you want; defaults to your folder + resource_sanitychecks.xlx
-  [string]$FilePath
+    [Parameter(Mandatory=$true)][string]$adh_group,             # e.g., ADHCSM (custodian suffix in sub name)
+    [Parameter(Mandatory=$true)][ValidateSet('prd','nonprd')][string]$adh_subscription_type,
+    [string]$FilePath,                                          # resource_sanitychecks.xlx (or .xlsx/.xls)
+    [bool]$IncludeSecretValues = $true
 )
 
-# ---------- Modules ----------
+# ---------------- Modules ----------------
 if (-not (Get-Module -ListAvailable -Name Az)) {
-  Install-Module -Name Az -Force -AllowClobber -Scope CurrentUser -Confirm:$false
+    Install-Module -Name Az -Force -AllowClobber -Scope CurrentUser -Confirm:$false
 }
 Import-Module Az -ErrorAction Stop
 
 if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
-  Install-Module -Name ImportExcel -Force -Scope CurrentUser -Confirm:$false
+    Install-Module -Name ImportExcel -Force -Scope CurrentUser -Confirm:$false
 }
 Import-Module ImportExcel -ErrorAction Stop
 
-# ---------- Env ----------
-$adh_group    = "$($env:adh_group)"              # custodian; used in filenames
-$tenantId     = $env:tenant_id
+# ---------------- Inputs & Environment ----------------
+# SPN creds are provided from ADO Variable Groups via env vars
+#   modernization_terraform_subscription_details
+#   test_modernization_terraform_subscription_details
+#   modernization_tfstate_backend_details
 $clientId     = $env:client_id
 $clientSecret = $env:client_secret
 
-# include values? true/false (default true as per your ask)
-$includeValues = $true
-if ($env:INCLUDE_SECRET_VALUES) { $includeValues = [System.Convert]::ToBoolean($env:INCLUDE_SECRET_VALUES) }
-
-foreach ($v in 'adh_group','tenant_id','client_id','client_secret') {
-  if (-not $env:$v -and $v -ne 'adh_group') { throw "Missing env var: $v" }
+if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($clientSecret)) {
+    throw "Missing Service Principal credentials (client_id / client_secret) from variable groups."
 }
-if (-not $adh_group) { throw "Missing env var: adh_group" }
 
-# ---------- Base paths ----------
+# Base folder for IO
 $BasePath = Join-Path $env:System_DefaultWorkingDirectory 'Modernization_Terraform/sanitychecks'
 if (-not (Test-Path $BasePath)) { throw "Base path not found: $BasePath" }
 
-# Input workbook default
+# Resolve workbook path:
 if (-not $FilePath) { $FilePath = Join-Path $BasePath 'resource_sanitychecks.xlx' }
-
-# Resolve .xlx/.xlsx gracefully
-function Resolve-Workbook([string]$p){
-  if (Test-Path -LiteralPath $p) { return $p }
-  $asXlsx = [IO.Path]::ChangeExtension($p,'xlsx')
-  if (Test-Path -LiteralPath $asXlsx) { return $asXlsx }
-  $asXls  = [IO.Path]::ChangeExtension($p,'xls')
-  if (Test-Path -LiteralPath $asXls) { return $asXls }
-  throw "Workbook not found. Tried: `n - $p`n - $asXlsx`n - $asXls"
+function Resolve-Workbook([string]$p) {
+    if (Test-Path -LiteralPath $p) { return $p }
+    $alt = [IO.Path]::ChangeExtension($p,'xlsx'); if (Test-Path -LiteralPath $alt) { return $alt }
+    $alt = [IO.Path]::ChangeExtension($p,'xls');  if (Test-Path -LiteralPath $alt) { return $alt }
+    throw "Workbook not found. Tried: $p / $( [IO.Path]::ChangeExtension($p,'xlsx') ) / $( [IO.Path]::ChangeExtension($p,'xls') )"
 }
 $ExcelPath = Resolve-Workbook -p $FilePath
 
-# Outputs under same folder
-$outDir = Join-Path $BasePath 'kv-scan'
-if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
-
-# ---------- Azure login ----------
-$sp = New-Object System.Management.Automation.PSCredential($clientId,(ConvertTo-SecureString $clientSecret -AsPlainText -Force))
-Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $sp -ErrorAction Stop | Out-Null
-
-# ---------- Read KV secrets sheet ----------
+# ---------------- Read KV Secrets list ----------------
 $WorksheetName    = 'KVSecrets'
 $SecretColumnName = 'SECRET NAME'
-
 $data = Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName -ErrorAction Stop
 if (-not ($data | Get-Member -Name $SecretColumnName -MemberType NoteProperty)) {
-  throw "Column '$SecretColumnName' not found in worksheet '$WorksheetName'."
+    throw "Column '$SecretColumnName' not found in sheet '$WorksheetName'."
 }
 $SecretNames = $data.$SecretColumnName |
-  Where-Object { $_ -and $_.ToString().Trim() } |
-  ForEach-Object { $_.ToString().Trim() } |
-  Sort-Object -Unique
+    Where-Object { $_ -and $_.ToString().Trim() } |
+    ForEach-Object { $_.ToString().Trim() } |
+    Sort-Object -Unique
 if (-not $SecretNames) { throw "No secret names found in '$SecretColumnName'." }
 
-# ---------- Helpers ----------
-function Render-Value([string]$v){
-  if ($includeValues) { return $v }
-  if ([string]::IsNullOrEmpty($v)) { return "" }
-  if ($v.Length -le 6) { return "***masked***" }
-  return "{0}{1}{2}" -f $v.Substring(0,2),'***masked***',$v.Substring($v.Length-2,2)
+# ---------------- Auth (Tenant optional) ----------------
+$spCred = New-Object System.Management.Automation.PSCredential ($clientId, (ConvertTo-SecureString $clientSecret -AsPlainText -Force))
+
+# First try without tenant (your ask). If it fails and TENANT is provided, retry with it.
+try {
+    Connect-AzAccount -ServicePrincipal -Credential $spCred -ErrorAction Stop | Out-Null
+} catch {
+    if ($env:tenant_id) {
+        Write-Warning "Retrying login using provided tenant_id..."
+        Connect-AzAccount -ServicePrincipal -Tenant $env:tenant_id -Credential $spCred -ErrorAction Stop | Out-Null
+    } else {
+        throw "Azure login failed and tenant_id not provided. $_"
+    }
 }
 
-# ---------- Scan subscriptions & vaults ----------
-$subs = Get-AzSubscription -ErrorAction Stop
+# ---------------- Pick Subscriptions based on naming convention ----------------
+# Examples expected:
+#   dev_azure_20921_ADHCSM
+#   prd_azure_20920_ADHCSM
+$allSubs = Get-AzSubscription -ErrorAction Stop
+$patternSuffix = "_$adh_group"             # e.g., _ADHCSM
+
+if ($adh_subscription_type -eq 'nonprd') {
+    # Only dev subscriptions (tst/stg are environments within dev sub, as per your note)
+    $subs = $allSubs | Where-Object { $_.Name -like "dev_*$patternSuffix" }
+} else {
+    # prd subscriptions
+    $subs = $allSubs | Where-Object { $_.Name -like "prd_*$patternSuffix" }
+}
+
+if (-not $subs) { throw "No subscriptions matched: type=$adh_subscription_type, adh_group=$adh_group, pattern=*_*$patternSuffix" }
+
+# ---------------- Helper: render value ----------------
+function Render-Value([string]$v, [bool]$include) {
+    if ($include) { return $v }
+    if ([string]::IsNullOrEmpty($v)) { return "" }
+    if ($v.Length -le 6) { return "***masked***" }
+    return "{0}{1}{2}" -f $v.Substring(0,2),'***masked***',$v.Substring($v.Length-2,2)
+}
+
+# ---------------- Scan subs & vaults ----------------
 $results = New-Object System.Collections.Generic.List[object]
 
-foreach ($s in $subs) {
-  try { Set-AzContext -SubscriptionId $s.Id -ErrorAction Stop | Out-Null }
-  catch { Write-Warning "Skip sub $($s.Name): $($_.Exception.Message)"; continue }
+foreach ($sub in $subs) {
+    Write-Host "`n=== Subscription: $($sub.Name) [$($sub.Id)] ==="
+    Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
 
-  $vaults = @()
-  try { $vaults = Get-AzKeyVault -ErrorAction Stop }
-  catch { Write-Warning "No KV list in $($s.Name): $($_.Exception.Message)"; continue }
-  if (-not $vaults) { continue }
-
-  foreach ($kv in $vaults) {
-    foreach ($name in $SecretNames) {
-      try {
-        $sec = Get-AzKeyVaultSecret -VaultName $kv.VaultName -Name $name -ErrorAction Stop
-        $results.Add([pscustomobject]@{
-          Custodian=$adh_group; SubscriptionName=$s.Name; SubscriptionId=$s.Id; VaultName=$kv.VaultName
-          SecretName=$name; Exists='Yes'; Value=(Render-Value $sec.SecretValueText); Version=$sec.Version
-          ContentType=$sec.ContentType; UpdatedOn=$sec.Updated
-        })
-      } catch {
-        $results.Add([pscustomobject]@{
-          Custodian=$adh_group; SubscriptionName=$s.Name; SubscriptionId=$s.Id; VaultName=$kv.VaultName
-          SecretName=$name; Exists='No'; Value=''; Version=''; ContentType=''; UpdatedOn=''
-        })
-      }
+    $vaults = @()
+    try {
+        $vaults = Get-AzKeyVault -ErrorAction Stop
+    } catch {
+        Write-Warning "  Could not list Key Vaults: $($_.Exception.Message)"
+        $vaults = @()
     }
-  }
+
+    if (-not $vaults -or $vaults.Count -eq 0) {
+        # KeyVaults missing in this subscription → produce rows per secret with reason
+        foreach ($secName in $SecretNames) {
+            $results.Add([pscustomobject]@{
+                Custodian        = $adh_group
+                SubscriptionName = $sub.Name
+                SubscriptionId   = $sub.Id
+                VaultName        = "N/A (no key vaults)"
+                SecretName       = $secName
+                Exists           = "No"
+                Value            = ""
+                Version          = ""
+                ContentType      = ""
+                UpdatedOn        = ""
+                MissingReason    = "No Key Vaults in subscription"
+            })
+        }
+        continue
+    }
+
+    foreach ($kv in $vaults) {
+        Write-Host "  -> Vault: $($kv.VaultName)"
+        foreach ($secName in $SecretNames) {
+            try {
+                $sec = Get-AzKeyVaultSecret -VaultName $kv.VaultName -Name $secName -ErrorAction Stop
+                $results.Add([pscustomobject]@{
+                    Custodian        = $adh_group
+                    SubscriptionName = $sub.Name
+                    SubscriptionId   = $sub.Id
+                    VaultName        = $kv.VaultName
+                    SecretName       = $secName
+                    Exists           = "Yes"
+                    Value            = (Render-Value $sec.SecretValueText $IncludeSecretValues)
+                    Version          = $sec.Version
+                    ContentType      = $sec.ContentType
+                    UpdatedOn        = $sec.Updated
+                    MissingReason    = ""
+                })
+            } catch {
+                $results.Add([pscustomobject]@{
+                    Custodian        = $adh_group
+                    SubscriptionName = $sub.Name
+                    SubscriptionId   = $sub.Id
+                    VaultName        = $kv.VaultName
+                    SecretName       = $secName
+                    Exists           = "No"
+                    Value            = ""
+                    Version          = ""
+                    ContentType      = ""
+                    UpdatedOn        = ""
+                    MissingReason    = "Secret not found"
+                })
+            }
+        }
+    }
 }
 
-# ---------- Outputs (CSV + HTML) ----------
-$ts = (Get-Date).ToString('yyyyMMdd_HHmmss')
-$base = "$adh_group-KeyVault-Secret-Check-$ts"
-$csvPath  = Join-Path $outDir "$base.csv"
-$htmlPath = Join-Path $outDir "$base.html"
+# ---------------- Output CSV (in same folder) ----------------
+$outDir  = Join-Path $BasePath 'kv-scan'
+if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
+$ts      = (Get-Date).ToString('yyyyMMdd_HHmmss')
+$outCsv  = Join-Path $outDir "$adh_group-KeyVault-Secret-Check-$ts.csv"
 
-$results | Sort-Object Custodian,SubscriptionName,VaultName,SecretName |
-  Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+$results |
+  Sort-Object SubscriptionName, VaultName, SecretName |
+  Export-Csv -Path $outCsv -NoTypeInformation -Encoding UTF8
 
-$style = @"
-table{border-collapse:collapse;font-family:Arial;font-size:12px}
-th,td{border:1px solid #ddd;padding:6px 8px} th{background:#f2f2f2;text-align:left}
-tr:nth-child(even){background:#fafafa} .bad{color:#a40000;font-weight:600} .good{color:#0b6a0b;font-weight:600}
-"@
-$rows = ($results | Sort-Object Custodian,SubscriptionName,VaultName,SecretName | ForEach-Object{
-  $cls = if($_.Exists -eq 'Yes'){'good'}else{'bad'}
-  "<tr><td>$($_.Custodian)</td><td>$($_.SubscriptionName)</td><td>$($_.SubscriptionId)</td><td>$($_.VaultName)</td><td>$($_.SecretName)</td><td class='$cls'>$($_.Exists)</td><td>$($_.Value)</td><td>$($_.Version)</td><td>$($_.ContentType)</td><td>$($_.UpdatedOn)</td></tr>"
-}) -join "`n"
-
-$html = @"
-<html>
-<head><meta charset='UTF-8'><style>$style</style></head>
-<body>
-<h3>Key Vault Secret Check — Custodian: $adh_group</h3><p>Run: $(Get-Date)</p>
-<table>
-  <thead><tr><th>Custodian</th><th>Subscription</th><th>SubscriptionId</th><th>KeyVault</th><th>Secret</th><th>Status</th><th>Value</th><th>Version</th><th>ContentType</th><th>UpdatedOn</th></tr></thead>
-  <tbody>$rows</tbody>
-</table>
-</body></html>
-"@
-Set-Content -Path $htmlPath -Value $html -Encoding UTF8
-
-# ---------- Optional commit/push (set PUSH_TO_REPO=true in YAML if you want this here) ----------
-if (($env:PUSH_TO_REPO ?? 'false') -eq 'true') {
-  Set-Location $BasePath
-  git config user.email "ado-bot@local"
-  git config user.name  "ADO Pipeline Bot"
-  git add "kv-scan/*"
-  git commit -m "[$adh_group] KV secrets scan $ts" || Write-Host "No changes"
-  git push
-}
-
-Write-Host "CSV: $csvPath"
-Write-Host "HTML: $htmlPath"
+Write-Host "Scan complete. CSV: $outCsv"
