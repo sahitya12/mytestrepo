@@ -15,3 +15,6 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\Scan-KV-Secrets-FromXlsx.ps1
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\Scan-KV-Secrets-FromXlsx.ps1
 
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+
