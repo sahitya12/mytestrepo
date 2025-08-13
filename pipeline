@@ -1,0 +1,36 @@
+trigger: none
+pool: { vmImage: 'windows-latest' }
+
+# Parameters for KV Secrets
+parameters:
+- name: adh_group
+  type: string
+  default: 'CSM'           # short code, e.g., CSM/HDD/HGS
+- name: adh_subscription_type
+  type: string
+  default: 'nonprd'
+  values: [ 'nonprd', 'prd' ]
+- name: filePath
+  type: string
+  default: '$(System.DefaultWorkingDirectory)/Modernization_Terraform/sanitychecks/resource_sanitychecks.xlsx'
+- name: includeValues
+  type: boolean
+  default: true
+- name: manualKVSecrets
+  type: boolean
+  default: false
+
+# Variable groups (SPN creds live here)
+variables:
+- group: modernization_terraform_subscription_details
+- group: test_modernization_terraform_subscription_details
+- group: modernization_tfstate_backend_details
+
+stages:
+- template: ./stages/kv-secrets.stage.yml
+  parameters:
+    manual: ${{ parameters.manualKVSecrets }}
+    adh_group: ${{ parameters.adh_group }}
+    adh_subscription_type: ${{ parameters.adh_subscription_type }}
+    filePath: ${{ parameters.filePath }}
+    includeValues: ${{ parameters.includeValues }}
