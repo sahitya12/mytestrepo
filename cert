@@ -6,3 +6,7 @@ Set-AuthenticodeSignature -FilePath .\KeyVaultScan.ps1 -Certificate $cert
 
 
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\Scan-KV-Secrets-Local-SPN-Robust.ps1
+
+
+# PowerShell 7 recommended
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\Scan-KV-Secrets-FromXlsx.ps1
