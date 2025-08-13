@@ -10,3 +10,8 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\Scan-KV-Secrets-Local-SPN-Robust
 
 # PowerShell 7 recommended
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\Scan-KV-Secrets-FromXlsx.ps1
+
+
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\Scan-KV-Secrets-FromXlsx.ps1
+
