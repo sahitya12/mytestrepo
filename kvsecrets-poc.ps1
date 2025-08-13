@@ -1,12 +1,12 @@
 <# ====================== CONFIGURE THESE VALUES ====================== #>
 
-# Excel file path (sheet 'KVSecrets', column 'SECRET NAME')
+# Excel path (sheet with secret names; script auto-detects "KVSecrets" OR "KeyVaults Secrets")
 $FilePath  = "C:\path\to\resource_sanitychecks.xlsx"
 
-# Short custodian suffix used in subscription names (e.g., CSM -> matches *_ADHCSM)
+# Custodian suffix used in subscription names (e.g., CSM -> matches *_ADHCSM)
 $adh_group = "CSM"
 
-# Output directory (if blank, a 'kv-scan-local' folder will be created next to the Excel)
+# Output directory (leave blank to create 'kv-scan-local' beside the Excel)
 $OutputDir = ""
 
 # Include raw secret values in outputs? ($true = include, $false = mask)
@@ -17,17 +17,15 @@ $ClientId     = "<appId-guid>"
 $ClientSecret = "<sp-secret>"
 $TenantId     = "<tenant-guid>"
 
-# Also log in Azure CLI context? (usually not required) 
+# If you also want an Azure CLI session (not required here)
 $AlsoAzCliLogin = $false
 
 <# ========================= DO NOT EDIT BELOW ======================== #>
 
 # ---------------- Modules (import only) ----------------
-try { Import-Module Az -ErrorAction Stop }
-catch { throw "Az module not found. Install once: Install-Module Az -Scope CurrentUser" }
-
-try { Import-Module ImportExcel -ErrorAction Stop }
-catch { throw "ImportExcel module not found. Install once: Install-Module ImportExcel -Scope CurrentUser" }
+try { Import-Module Az.Accounts -ErrorAction Stop } catch { throw "Az.Accounts not found. Install once: Install-Module Az -Scope CurrentUser" }
+try { Import-Module Az.KeyVault  -ErrorAction Stop } catch { throw "Az.KeyVault not found. Install once: Install-Module Az -Scope CurrentUser" }
+try { Import-Module ImportExcel  -ErrorAction Stop } catch { throw "ImportExcel not found. Install once: Install-Module ImportExcel -Scope CurrentUser" }
 
 # ---------------- Validate & resolve input path ----------------
 if ([string]::IsNullOrWhiteSpace($FilePath)) { throw "FilePath is required and cannot be empty." }
@@ -54,7 +52,7 @@ if (-not (Test-Path -LiteralPath $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir | Out-Null
 }
 
-# ---------------- SPN login ----------------
+# ---------------- SPN login & context scoping ----------------
 if ([string]::IsNullOrWhiteSpace($ClientId) -or [string]::IsNullOrWhiteSpace($ClientSecret) -or [string]::IsNullOrWhiteSpace($TenantId)) {
     throw "ClientId / ClientSecret / TenantId must be set in the CONFIG section."
 }
@@ -63,6 +61,8 @@ $creds  = New-Object System.Management.Automation.PSCredential ($ClientId, $secu
 
 try {
     Connect-AzAccount -ServicePrincipal -Tenant $TenantId -Credential $creds -ErrorAction Stop | Out-Null
+    # Pin the context to this tenant to avoid "more than one active subscription" ambiguity
+    Set-AzContext -Tenant $TenantId -ErrorAction Stop | Out-Null
 } catch {
     throw "Connect-AzAccount (SPN) failed: $($_.Exception.Message)"
 }
@@ -72,31 +72,100 @@ if ($AlsoAzCliLogin) {
     catch { Write-Warning "az login failed: $($_.Exception.Message)" }
 }
 
-# ---------------- Load secrets from Excel ----------------
-$WorksheetName    = 'KVSecrets'
-$SecretColumnName = 'SECRET NAME'
+# ---------------- Load secrets from Excel (robust sheet/column detection) ----------------
+# Try common worksheet names, else fall back to the first sheet that has a column like "SECRET NAME"
+$PreferredSheets = @('KVSecrets','KeyVaults Secrets','KeyVaults_Secrets','KeyVaultSecrets')
+$WorksheetName   = $null
+$SecretColumnName = $null
 
+# helper to normalize column names
+function Normalize([string]$s){ return ($s -replace '\s+',' ' ).Trim().ToUpperInvariant() }
+
+# Try preferred sheets first
+foreach ($ws in $PreferredSheets) {
+    try {
+        $probe = Import-Excel -Path $FilePath -WorksheetName $ws -StartRow 1 -EndRow 1 -ErrorAction Stop
+        if ($probe) { $WorksheetName = $ws; break }
+    } catch { }
+}
+
+# If not found, sniff the workbook to find a sheet that has a column similar to SECRET NAME
+if (-not $WorksheetName) {
+    try {
+        $wb = Open-ExcelPackage -Path $FilePath
+        $sheets = $wb.Workbook.Worksheets
+        foreach ($s in $sheets) {
+            try {
+                $hdr = Import-Excel -Path $FilePath -WorksheetName $s.Name -StartRow 1 -EndRow 1 -ErrorAction Stop
+                if ($hdr) { $WorksheetName = $s.Name; break }
+            } catch { }
+        }
+        Close-ExcelPackage $wb
+    } catch {
+        throw "Could not enumerate worksheets in '$FilePath': $($_.Exception.Message)"
+    }
+}
+
+if (-not $WorksheetName) { throw "No worksheet could be read. Ensure the workbook is not password-protected and has data." }
+
+# Load the whole sheet
 try {
     $data = Import-Excel -Path $FilePath -WorksheetName $WorksheetName -ErrorAction Stop
 } catch {
     throw "Failed to read sheet '$WorksheetName' from '$FilePath': $($_.Exception.Message)"
 }
-if (-not ($data | Get-Member -Name $SecretColumnName -MemberType NoteProperty)) {
-    throw "Column '$SecretColumnName' not found in sheet '$WorksheetName'."
+
+# Find a column that normalizes to 'SECRET NAME' (ignore spaces / case)
+$allProps = @()
+if ($data.Count -gt 0) {
+    $allProps = ($data[0].psobject.Properties | Select-Object -Expand Name)
+} elseif ($data) { # single row still works
+    $allProps = ($data.psobject.Properties | Select-Object -Expand Name)
 }
+if (-not $allProps) { throw "Sheet '$WorksheetName' appears empty." }
+
+$normMap = @{}
+foreach ($p in $allProps) { $normMap[(Normalize $p)] = $p }
+
+if ($normMap.ContainsKey('SECRET NAME')) {
+    $SecretColumnName = $normMap['SECRET NAME']
+} else {
+    # Also accept similar variants like 'SECRET_NAME', 'SECRETS', etc.
+    $candidate = $normMap.Keys | Where-Object { $_ -like 'SECRET*NAME*' -or $_ -eq 'SECRETS' } | Select-Object -First 1
+    if ($candidate) { $SecretColumnName = $normMap[$candidate] }
+}
+
+if (-not $SecretColumnName) {
+    $debugCols = ($allProps -join ', ')
+    throw "Could not find a 'SECRET NAME' column (case/space-insensitive). Columns found: $debugCols"
+}
+
 $SecretNames = $data.$SecretColumnName |
     Where-Object { $_ -and $_.ToString().Trim() } |
     ForEach-Object { $_.ToString().Trim() } |
     Sort-Object -Unique
-if (-not $SecretNames) { throw "No secret names found in column '$SecretColumnName'." }
-Write-Host "Loaded $($SecretNames.Count) secrets from '$WorksheetName'." -ForegroundColor Cyan
 
-# ---------------- Pick subscriptions by name (ends with *_ADH<adh_group>) ----------------
+if (-not $SecretNames -or $SecretNames.Count -eq 0) {
+    throw "No secret names found in column '$SecretColumnName' on sheet '$WorksheetName'."
+}
+Write-Host "Loaded $($SecretNames.Count) secret name(s) from sheet '$WorksheetName' (column '$SecretColumnName')." -ForegroundColor Cyan
+
+# ---------------- Pick subscriptions (in THIS tenant) by name pattern *_ADH<adh_group> ----------------
 $suffix = "_ADH$adh_group"
-$allSubs = Get-AzSubscription -ErrorAction Stop
+
+# Scope to tenant to avoid ambiguity
+$allSubs = Get-AzSubscription -TenantId $TenantId -ErrorAction Stop
+# Some environments require explicitly selecting them as well:
+if (-not $allSubs) {
+    throw "No subscriptions found in tenant $TenantId for the given SPN."
+}
+
 $subs = $allSubs | Where-Object { $_.Name -like "*$suffix" }
-if (-not $subs) { throw "No subscriptions matched '*$suffix'. Expected like: dev_...$suffix or prd_...$suffix" }
-Write-Host "Scanning $($subs.Count) subscription(s) matching '*$suffix'..." -ForegroundColor Cyan
+if (-not $subs) {
+    $avail = ($allSubs.Name -join '; ')
+    throw "No subscriptions matched '*$suffix'. Available in tenant: $avail"
+}
+Write-Host "Scanning $($subs.Count) subscription(s) matching '*$suffix' (tenant $TenantId)..." -ForegroundColor Cyan
 
 # ---------------- Helpers ----------------
 function Render-Value {
@@ -112,7 +181,8 @@ $results = New-Object System.Collections.Generic.List[object]
 
 foreach ($sub in $subs) {
     Write-Host "`n=== Subscription: $($sub.Name) [$($sub.Id)] ===" -ForegroundColor Green
-    Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
+    # Disambiguate by passing tenant every time
+    Set-AzContext -SubscriptionId $sub.Id -Tenant $TenantId -ErrorAction Stop | Out-Null
 
     $vaults = @()
     try { $vaults = Get-AzKeyVault -ErrorAction Stop }
