@@ -1,0 +1,53 @@
+data "azurerm_storage_account" "sa" {
+  name                = var.storage_account_name
+  resource_group_name = var.resource_group_name
+}
+
+data "azurerm_storage_account_sas" "blob_sas" {
+  connection_string = data.azurerm_storage_account.sa.primary_connection_string
+
+  https_only = true
+  start      = timestamp()
+  expiry     = timeadd(timestamp(), "24h")  # adjust as needed
+
+  services { blob = true, queue = false, table = false, file = false }
+  resource_types { service = false, container = false, object = true }
+  permissions {
+    read   = true
+    list   = false
+    write  = false
+    add    = false
+    create = false
+    delete = false
+    update = false
+    tag    = false
+    filter = false
+    process = false
+  }
+
+  # Scope to the specific blob
+  canonicalized_resource = "/blob/${data.azurerm_storage_account.sa.name}/${var.container_name}/${var.blob_name}"
+}
+
+locals {
+  blob_url     = "${data.azurerm_storage_account.sa.primary_blob_endpoint}${var.container_name}/${var.blob_name}"
+  blob_sas_url = "${local.blob_url}?${data.azurerm_storage_account_sas.blob_sas.sas}"
+}
+
+****************************************
+
+# Example: existing Windows VM resource is azurerm_windows_virtual_machine.win
+# Replace vm id reference with your VM resource.
+resource "azurerm_virtual_machine_extension" "cse_windows" {
+  name                 = "cse-run-script"
+  virtual_machine_id   = azurerm_windows_virtual_machine.win.id
+  publisher            = "Microsoft.Compute"
+  type                 = "CustomScriptExtension"
+  type_handler_version = "1.10"
+
+  # NOTE: You can also put fileUris/commandToExecute into settings; using protected_settings reduces exposure in logs.
+  protected_settings = jsonencode({
+    fileUris          = [ local.blob_sas_url ]                 # downloads script from SAS URL
+    commandToExecute  = "powershell -ExecutionPolicy Bypass -File ${var.blob_name}"
+  })
+}
