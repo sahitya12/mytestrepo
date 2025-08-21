@@ -1,0 +1,40 @@
+# ------------------- HARD-CODE YOUR VALUES -------------------
+$StorageSubId   = "<storage-subscription-guid>"   # subscription where SA lives
+$ResourceGroup  = "<rg-name>"                     # RG of SA
+$StorageAccount = "<storageaccountname>"          # SA name
+$ContainerName  = "<container-name>"              # blob container
+$BlobName       = "<blob-name>"                   # e.g., install.ps1
+$ExpiryHours    = 24                              # SAS validity in hours
+# -------------------------------------------------------------
+
+# Ensure Az modules are available
+if (-not (Get-Module -ListAvailable -Name Az.Storage)) {
+    Install-Module -Name Az.Storage -Force -AllowClobber -Scope CurrentUser
+}
+Import-Module Az.Accounts
+Import-Module Az.Storage
+
+# Switch context to the subscription that has the storage account
+Set-AzContext -Subscription $StorageSubId
+
+# Get SA context
+$sa = Get-AzStorageAccount -ResourceGroupName $ResourceGroup -Name $StorageAccount
+$ctx = $sa.Context
+
+# Expiry time
+$expiry = (Get-Date).AddHours($ExpiryHours)
+
+# Generate SAS for the blob (read-only)
+$blobSasUrl = New-AzStorageBlobSASToken `
+    -Container $ContainerName `
+    -Blob $BlobName `
+    -Context $ctx `
+    -Permission r `
+    -ExpiryTime $expiry `
+    -FullUri    # returns full signed URL
+
+Write-Host "Blob SAS URL (valid $ExpiryHours h):"
+Write-Host $blobSasUrl
+
+# Make it available to caller scripts
+$global:blobSasUrl = $blobSasUrl
