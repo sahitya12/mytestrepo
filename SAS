@@ -1,0 +1,33 @@
+# Ensure Az module is installed
+if (-not (Get-Module -ListAvailable -Name Az.Storage)) {
+    Install-Module -Name Az.Storage -Force -Scope CurrentUser -AllowClobber
+}
+Import-Module Az.Storage
+
+# --------- INPUTS ----------
+$ResourceGroup   = "my-rg"
+$StorageAccount  = "mystorageacct"
+$ContainerName   = "mycontainer"
+$BlobName        = "install.ps1"
+$SasExpiryHours  = 24   # validity duration
+# ---------------------------
+
+# 1) Get Storage Account context
+$ctx = (Get-AzStorageAccount -ResourceGroupName $ResourceGroup -Name $StorageAccount).Context
+
+# 2) Generate a SAS token for the specific blob
+$expiry = (Get-Date).AddHours($SasExpiryHours)
+
+$blobSasToken = New-AzStorageBlobSASToken `
+    -Container $ContainerName `
+    -Blob $BlobName `
+    -Context $ctx `
+    -Permission r `
+    -ExpiryTime $expiry `
+    -FullUri    # <-- returns the full URL with ?sv=…sas…
+
+# 3) Store in a variable
+$blobSasUrl = $blobSasToken
+
+Write-Host "Signed blob URL (valid $SasExpiryHours hours):"
+Write-Host $blobSasUrl
