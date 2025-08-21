@@ -1,0 +1,54 @@
+<# 
+Generate a SAS URL for an existing blob.
+Hard-coded: Resource Group & Storage Account.
+Inputs: Container, Blob, Expiry (hours), Permissions.
+Outputs: $blobSasUrl (string with full signed URL)
+#>
+
+# ----------------- HARD-CODE THESE -----------------
+$ResourceGroup  = "rg-prod"          # <- your RG
+$StorageAccount = "stprod123"        # <- your storage account
+# ---------------------------------------------------
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$ContainerName,          # e.g. "scripts"
+
+    [Parameter(Mandatory=$true)]
+    [string]$BlobName,               # e.g. "install.ps1"
+
+    [int]$SasExpiryHours = 24,       # validity in hours
+    [string]$Permissions   = "r"     # e.g. "r" (read) or "rl" (read+list), "racwdlup" etc.
+)
+
+# Ensure Az modules
+if (-not (Get-Module -ListAvailable -Name Az.Accounts)) { Install-Module Az.Accounts -Scope CurrentUser -Force -AllowClobber }
+if (-not (Get-Module -ListAvailable -Name Az.Storage))  { Install-Module Az.Storage  -Scope CurrentUser -Force -AllowClobber }
+Import-Module Az.Accounts
+Import-Module Az.Storage
+
+# Try Managed Identity first (safe on Azure VMs), otherwise assume you’re already logged in
+try { Connect-AzAccount -Identity -ErrorAction Stop | Out-Null } catch { }
+
+# Get the Storage Account key (required to create a Service SAS)
+$sa       = Get-AzStorageAccount -ResourceGroupName $ResourceGroup -Name $StorageAccount
+$saKey    = (Get-AzStorageAccountKey -ResourceGroupName $ResourceGroup -Name $StorageAccount)[0].Value
+$ctx      = New-AzStorageContext -StorageAccountName $StorageAccount -StorageAccountKey $saKey
+
+# Expiry
+$expiry   = (Get-Date).AddHours($SasExpiryHours)
+
+# Build SAS for the specific blob (read-only by default)
+# Permissions string examples:
+#   r = read, l = list, w = write, c = create, d = delete, a = add, u = update, p = process
+$blobSasUrl = New-AzStorageBlobSASToken `
+    -Container    $ContainerName `
+    -Blob         $BlobName `
+    -Context      $ctx `
+    -ExpiryTime   $expiry `
+    -Permission   $Permissions `
+    -FullUri      # returns full URL: https://.../container/blob?sv=...
+
+# Make it available to the caller (and print once if you want logs)
+$global:blobSasUrl = $blobSasUrl
+Write-Host "Blob SAS URL (valid $SasExpiryHours h): $blobSasUrl"
