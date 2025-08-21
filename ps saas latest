@@ -38,3 +38,19 @@ Write-Host $blobSasUrl
 
 # Make it available to caller scripts
 $global:blobSasUrl = $blobSasUrl
+
+
+**********************************************************************
+
+$ResourceGroup  = "<rg-name>"
+$StorageAccount = "<storageaccount>"
+$ContainerName  = "<container>"
+$BlobName       = "<blob>"
+$Expiry         = (Get-Date).AddHours(24)
+
+$ctx = (Get-AzStorageAccount -ResourceGroupName $ResourceGroup -Name $StorageAccount).Context
+
+$blobSasUrl = New-AzStorageBlobSASToken -Container $ContainerName -Blob $BlobName -Context $ctx -Permission r -ExpiryTime $Expiry -FullUri
+
+Write-Host "Blob SAS URL: $blobSasUrl"
+
