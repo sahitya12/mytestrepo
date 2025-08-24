@@ -1,0 +1,29 @@
+# Install once
+Install-Module Az -Scope CurrentUser
+
+# 1) Scan ALL subscriptions with "ADH" in the name (one row per RG, check required keys)
+.\Scan-RG-Tags.ps1 `
+  -TenantId "<tenant-guid>" `
+  -ClientId "<appId-guid>" `
+  -ClientSecret "<secret>" `
+  -ScanAll `
+  -RequiredTagKeys owner,environment,costcenter `
+  -OutputDir "C:\reports\tags"
+
+# 2) Scan only ADH subscriptions for a custodian (e.g., CSM)
+.\Scan-RG-Tags.ps1 `
+  -TenantId "<tenant-guid>" `
+  -ClientId "<appId-guid>" `
+  -ClientSecret "<secret>" `
+  -CustodianFilter "CSM" `
+  -RequiredTagKeys owner `
+  -PerTagRows `
+  -TeamsWebhookUrl "<incoming-webhook-url>"
+
+# 3) Scan specific subscription IDs (overrides filters)
+.\Scan-RG-Tags.ps1 `
+  -TenantId "<tenant-guid>" `
+  -ClientId "<appId-guid>" `
+  -ClientSecret "<secret>" `
+  -SubscriptionIds "11111111-1111-1111-1111-111111111111","22222222-2222-2222-2222-222222222222"
+how 
