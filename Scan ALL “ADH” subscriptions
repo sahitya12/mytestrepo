@@ -1,0 +1,159 @@
+param(
+  [Parameter(Mandatory=$true)][string]$TenantId,
+  [Parameter(Mandatory=$true)][string]$ClientId,
+  [Parameter(Mandatory=$true)][string]$ClientSecret,
+  [Parameter(Mandatory=$true)][string]$ProdCsvPath,      # columns: resource_group_name, role_definition_name, ad_group_name
+  [Parameter(Mandatory=$true)][string]$NonProdCsvPath,   # same columns
+  [string]$adh_group = "",                               # fallback when sub name doesn't expose ADH<cust>
+  [string]$OutputDir = "",                               # default: ./infra-sanity-out
+  [string]$TeamsWebhookUrl = ""                          # optional
+)
+
+$ErrorActionPreference = 'Stop'
+Import-Module Az.Accounts -ErrorAction Stop
+Import-Module Az.Resources -ErrorAction Stop
+
+# ---------- Helpers ----------
+function Get-EnvFromSubscriptionName([string]$Name){
+  if ($Name -match '(?i)\b(prod|production|prd)\b'){ 'PRODUCTION' } else { 'NONPRODUCTION' }
+}
+function Get-CustodianFromSubscriptionName([string]$n){
+  if ($n -match '(?i)ADH([A-Za-z0-9_-]+)'){
+    $v = $Matches[1] -replace '^[^A-Za-z0-9]+',''
+    if ($v -match '^([A-Za-z0-9]+)'){ return $Matches[1] } else { return $v }
+  } ; return $null
+}
+function Normalize-Header([string]$s){ ($s -replace '[_\s]','').ToLowerInvariant() }
+function Load-ExpectedRows([string]$CsvPath){
+  if(-not(Test-Path $CsvPath)){ throw "CSV not found: $CsvPath" }
+  $raw = Import-Csv $CsvPath
+  if(-not $raw){ throw "CSV empty: $CsvPath" }
+  $map=@{}; foreach($k in $raw[0].psobject.Properties.Name){ $map[(Normalize-Header $k)]=$k }
+  foreach($req in 'resourcegroupname','roledefinitionname','adgroupname'){
+    if(-not $map.ContainsKey($req)){ throw "CSV missing column like '$req' in $CsvPath" }
+  }
+  $rows=@()
+  foreach($r in $raw){
+    $rows += [pscustomobject]@{
+      RawResourceGroup = "$($r.$($map['resourcegroupname']))".Trim()
+      RawRole          = "$($r.$($map['roledefinitionname']))".Trim()
+      RawGroup         = "$($r.$($map['adgroupname']))".Trim()
+    }
+  }
+  $rows
+}
+function Resolve-GroupByName([string]$name){
+  if([string]::IsNullOrWhiteSpace($name)){ return $null }
+  $g = Get-AzADGroup -DisplayName $name -ErrorAction SilentlyContinue
+  if(-not $g){ $g = Get-AzADGroup -SearchString $name -ErrorAction SilentlyContinue |? { $_.DisplayName -eq $name } | select -First 1 }
+  $g
+}
+function Ensure-OutputDir([string]$dir){
+  if([string]::IsNullOrWhiteSpace($dir)){ $dir = Join-Path (Get-Location).Path 'infra-sanity-out' }
+  if(-not(Test-Path $dir)){ New-Item -ItemType Directory -Path $dir | Out-Null }
+  $dir
+}
+
+# ---------- Login ----------
+$sec = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
+$creds = New-Object System.Management.Automation.PSCredential($ClientId,$sec)
+Connect-AzAccount -ServicePrincipal -Tenant $TenantId -Credential $creds | Out-Null
+
+# ---------- Pick subs: ALL names containing ADH ----------
+$subs = Get-AzSubscription | ? { $_.Name -match '(?i)ADH' }
+if(-not $subs){ throw "No subscriptions with 'ADH' in name were found." }
+
+# ---------- Load inputs ----------
+$prodRows    = Load-ExpectedRows $ProdCsvPath
+$nonprodRows = Load-ExpectedRows $NonProdCsvPath
+
+# ---------- Outputs ----------
+$OutputDir = Ensure-OutputDir $OutputDir
+$stamp = (Get-Date).ToString('yyyyMMdd_HHmmss')
+$permCsv = Join-Path $OutputDir "permissions_${stamp}.csv"
+$permHtml= Join-Path $OutputDir "permissions_${stamp}.html"
+$tagsCsv = Join-Path $OutputDir "tags_${stamp}.csv"
+$tagsHtml= Join-Path $OutputDir "tags_${stamp}.html"
+$perm = New-Object System.Collections.Generic.List[object]
+$tags = New-Object System.Collections.Generic.List[object]
+
+# ---------- Scan ----------
+foreach($sub in $subs){
+  Set-AzContext -Tenant $TenantId -SubscriptionId $sub.Id | Out-Null
+  $env = Get-EnvFromSubscriptionName $sub.Name
+  $expected = if($env -eq 'PRODUCTION'){ $prodRows } else { $nonprodRows }
+
+  # derive custodian from sub name; fallback to param
+  $subCust = Get-CustodianFromSubscriptionName $sub.Name
+  if(-not $subCust -and $adh_group){ $subCust = $adh_group }
+
+  # RG list & tags
+  $rgList = Get-AzResourceGroup -ErrorAction SilentlyContinue
+  $rgMap=@{}; foreach($r in $rgList){ if($r.ResourceGroupName){ $rgMap[$r.ResourceGroupName.ToLowerInvariant()]=$r } }
+  foreach($r in $rgList){
+    $flat = if($r.Tags){ ($r.Tags.GetEnumerator() | % { "$($_.Key)=$($_.Value)" }) -join '; ' } else { '' }
+    $tags.Add([pscustomobject]@{ SubscriptionName=$sub.Name; SubscriptionId=$sub.Id; Environment=$env; ResourceGroup=$r.ResourceGroupName; TagsFlat=$flat })
+  }
+
+  foreach($row in $expected){
+    $inputRG  = $row.RawResourceGroup
+    $inputRole= $row.RawRole
+    $inputGrp = $row.RawGroup
+
+    $scanRG   = if($subCust){ $inputRG  -replace '<Custodian>',$subCust } else { $inputRG }
+    $roleName = if($subCust){ $inputRole- replace '<Custodian>',$subCust } else { $inputRole }
+    $resGrp   = if($subCust){ $inputGrp - replace '<Custodian>',$subCust } else { $inputGrp }
+
+    $rgKey = if($scanRG){ $scanRG.ToLowerInvariant() } else { '' }
+    $rgObj = if($rgKey -and $rgMap.ContainsKey($rgKey)){ $rgMap[$rgKey] } else { $null }
+
+    if(-not $rgObj){
+      $perm.Add([pscustomobject]@{ SubscriptionName=$sub.Name; SubscriptionId=$sub.Id; Environment=$env
+        InputResourceGroup=$inputRG; ScannedResourceGroup=$scanRG; RoleDefinition=$roleName
+        InputAdGroup=$inputGrp; ResolvedAdGroup=$resGrp; GroupObjectId=''
+        RGStatus='NOT_FOUND'; PermissionStatus='N/A_RG_NOT_FOUND'; Status='RG_NOT_FOUND'; Details='Resource group not found' })
+      continue
+    }
+
+    $grpObj = Resolve-GroupByName $resGrp
+    if(-not $grpObj){
+      $perm.Add([pscustomobject]@{ SubscriptionName=$sub.Name; SubscriptionId=$sub.Id; Environment=$env
+        InputResourceGroup=$inputRG; ScannedResourceGroup=$scanRG; RoleDefinition=$roleName
+        InputAdGroup=$inputGrp; ResolvedAdGroup=$resGrp; GroupObjectId=''
+        RGStatus='EXISTS'; PermissionStatus='N/A_GROUP_NOT_FOUND'; Status='GROUP_NOT_FOUND'; Details='Entra ID group not found' })
+      continue
+    }
+
+    $scope = "/subscriptions/$($sub.Id)/resourceGroups/$scanRG"
+    $ra = Get-AzRoleAssignment -Scope $scope -ObjectId $grpObj.Id -RoleDefinitionName $roleName -ErrorAction SilentlyContinue
+    if($ra){
+      $perm.Add([pscustomobject]@{ SubscriptionName=$sub.Name; SubscriptionId=$sub.Id; Environment=$env
+        InputResourceGroup=$inputRG; ScannedResourceGroup=$scanRG; RoleDefinition=$roleName
+        InputAdGroup=$inputGrp; ResolvedAdGroup=$resGrp; GroupObjectId=$grpObj.Id
+        RGStatus='EXISTS'; PermissionStatus='EXISTS'; Status='EXISTS'; Details='' })
+    } else {
+      $perm.Add([pscustomobject]@{ SubscriptionName=$sub.Name; SubscriptionId=$sub.Id; Environment=$env
+        InputResourceGroup=$inputRG; ScannedResourceGroup=$scanRG; RoleDefinition=$roleName
+        InputAdGroup=$inputGrp; ResolvedAdGroup=$resGrp; GroupObjectId=$grpObj.Id
+        RGStatus='EXISTS'; PermissionStatus='MISSING'; Status='MISSING'; Details='Role assignment not found at RG scope' })
+    }
+  }
+}
+
+# ---------- Export ----------
+$perm | Export-Csv $permCsv -NoTypeInformation -Encoding UTF8
+$tags | Export-Csv $tagsCsv -NoTypeInformation -Encoding UTF8
+($perm | ConvertTo-Html -Title "Permissions $stamp" -PreContent "<h2>Permissions $stamp</h2>") | Set-Content -Path $permHtml -Encoding UTF8
+($tags | ConvertTo-Html -Title "Tags $stamp"        -PreContent "<h2>Tags $stamp</h2>")        | Set-Content -Path $tagsHtml -Encoding UTF8
+
+Write-Host "`nPermissions: $permCsv`nPermissions HTML: $permHtml`nTags: $tagsCsv`nTags HTML: $tagsHtml"
+
+# Optional Teams notification
+if($TeamsWebhookUrl){
+  $ok = ($perm | ? { $_.PermissionStatus -eq 'EXISTS' }).Count
+  $mi = ($perm | ? { $_.PermissionStatus -eq 'MISSING' }).Count
+  $rg = ($perm | ? { $_.PermissionStatus -eq 'N/A_RG_NOT_FOUND' }).Count
+  $gg = ($perm | ? { $_.PermissionStatus -eq 'N/A_GROUP_NOT_FOUND' }).Count
+  $summary = "Infra Sanity (ALL ADH) $stamp`nTotal: $($perm.Count) Exists:$ok Missing:$mi RG_NA:$rg Group_NA:$gg"
+  try{ Invoke-RestMethod -Method Post -Uri $TeamsWebhookUrl -ContentType 'application/json' -Body (@{text=$summary}|ConvertTo-Json) }catch{ Write-Warning "Teams post failed: $_" }
+}
