@@ -1,0 +1,20 @@
+trigger: none
+
+parameters:
+- name: adh_group
+  displayName: Custodian (adh_group)
+  type: string
+  default: CSM
+
+stages:
+- template: stages/rg-permissions.stage.yml
+  parameters:
+    adh_group: ${{ parameters.adh_group }}
+    prodCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/prod_permissions.csv'
+    nonProdCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/nonprod_permissions.csv'
+    variableGroup: 'rg-sanity-secrets'   # <- your group name
+
+- template: stages/rg-tags.stage.yml
+  parameters:
+    adh_group: ${{ parameters.adh_group }}
+    variableGroup: 'rg-sanity-secrets'
