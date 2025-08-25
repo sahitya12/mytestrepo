@@ -2,7 +2,7 @@ parameters:
   adh_group: ''
   prodCsvPath: ''
   nonProdCsvPath: ''
-  variableGroup: 'rg-sanity-secrets'
+  variableGroup: 'modernization_tfstate_backend_details'
 
 stages:
 - stage: RG_Permissions
@@ -17,9 +17,9 @@ stages:
       scriptPath: 'sanitychecks/scripts/Scan-RG-Permissions-ByCustodian.ps1'
       workingDir: '$(Build.SourcesDirectory)/sanitychecks/scripts'
       arguments: >
-        -TenantId "$(tenantId)"
-        -ClientId "$(clientId)"
-        -ClientSecret "$(clientSecret)"
+        -TenantId "$(tenant_id)"
+        -ClientId "$(backend_client_id)"
+        -ClientSecret "$(backend_client_secret)"
         -ProdCsvPath "${{ parameters.prodCsvPath }}"
         -NonProdCsvPath "${{ parameters.nonProdCsvPath }}"
         -adh_group "${{ parameters.adh_group }}"
