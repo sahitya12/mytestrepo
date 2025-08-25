@@ -1,0 +1,33 @@
+parameters:
+  variableGroup: 'modernization_tfstate_backend_details'
+  displayName: 'Run PowerShell (plain)'
+  scriptPath: ''
+  workingDir: ''
+  arguments: ''
+  artifactName: 'scan-out'
+  publishPath: '$(Build.ArtifactStagingDirectory)/scan-out'
+
+jobs:
+- job: run_script_plain
+  displayName: ${{ parameters.displayName }}
+  pool:
+    vmImage: 'windows-latest'
+
+  variables:
+  - group: ${{ parameters.variableGroup }}
+
+  steps:
+  - task: PowerShell@2
+    displayName: Run ${{ parameters.scriptPath }}
+    inputs:
+      targetType: filePath
+      filePath: '$(Build.SourcesDirectory)/${{ parameters.scriptPath }}'
+      workingDirectory: ${{ parameters.workingDir }}
+      arguments: ${{ parameters.arguments }}
+      pwsh: true
+
+  - task: PublishBuildArtifacts@1
+    displayName: Publish artifacts (${{ parameters.artifactName }})
+    inputs:
+      PathtoPublish: ${{ parameters.publishPath }}
+      ArtifactName: ${{ parameters.artifactName }}
