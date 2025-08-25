@@ -16,6 +16,7 @@ stages:
       displayName: 'RG Permissions Scan'
       scriptPath: 'sanitychecks/scripts/Scan-RG-Permissions-ByCustodian.ps1'
       workingDir: '$(Build.SourcesDirectory)/sanitychecks/scripts'
+      # The script itself performs Connect-AzAccount, scans only subs with ADH+custodian
       arguments: >
         -TenantId "$(tenant_id)"
         -ClientId "$(backend_client_id)"
