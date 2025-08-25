@@ -1,76 +1,20 @@
 trigger: none
 
-# Use Library → Variable Group for SPN + (optional) Teams webhook
-variables:
-- group: rg-sanity-secrets
-  # tenantId, clientId, clientSecret, teamsWebhook (secrets)
-
 parameters:
 - name: adh_group
   displayName: Custodian (adh_group)
   type: string
   default: CSM
 
-- name: run_rg_permissions
-  type: boolean
-  default: true
-- name: run_rg_tags
-  type: boolean
-  default: true
-- name: run_kv
-  type: boolean
-  default: false
-- name: run_adls
-  type: boolean
-  default: false
-- name: run_adf
-  type: boolean
-  default: false
-- name: run_databricks
-  type: boolean
-  default: false
-
 stages:
-# RG Permissions
-- ${{ if eq(parameters.run_rg_permissions, true) }}:
-  - template: stages/rg-permissions.stage.yml
-    parameters:
-      adh_group: ${{ parameters.adh_group }}
-      teamsWebhook: $(teamsWebhook)
-      prodCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/prod_permissions.csv'
-      nonProdCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/nonprod_permissions.csv'
+- template: stages/rg-permissions.stage.yml
+  parameters:
+    adh_group: ${{ parameters.adh_group }}
+    prodCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/prod_permissions.csv'
+    nonProdCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/nonprod_permissions.csv'
+    variableGroup: 'modernization_tfstate_backend_details'
 
-# RG Tags
-- ${{ if eq(parameters.run_rg_tags, true) }}:
-  - template: stages/rg-tags.stage.yml
-    parameters:
-      adh_group: ${{ parameters.adh_group }}
-      teamsWebhook: $(teamsWebhook)
-
-# Key Vault
-- ${{ if eq(parameters.run_kv, true) }}:
-  - template: stages/kv-secrets.stage.yml
-    parameters:
-      adh_group: ${{ parameters.adh_group }}
-      teamsWebhook: $(teamsWebhook)
-
-# ADLS
-- ${{ if eq(parameters.run_adls, true) }}:
-  - template: stages/adls.stage.yml
-    parameters:
-      adh_group: ${{ parameters.adh_group }}
-      teamsWebhook: $(teamsWebhook)
-
-# ADF
-- ${{ if eq(parameters.run_adf, true) }}:
-  - template: stages/adf.stage.yml
-    parameters:
-      adh_group: ${{ parameters.adh_group }}
-      teamsWebhook: $(teamsWebhook)
-
-# Databricks
-- ${{ if eq(parameters.run_databricks, true) }}:
-  - template: stages/databricks.stage.yml
-    parameters:
-      adh_group: ${{ parameters.adh_group }}
-      teamsWebhook: $(teamsWebhook)
+- template: stages/rg-tags.stage.yml
+  parameters:
+    adh_group: ${{ parameters.adh_group }}
+    variableGroup: 'modernization_tfstate_backend_details'
