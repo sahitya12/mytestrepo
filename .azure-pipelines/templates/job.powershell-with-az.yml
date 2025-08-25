@@ -1,15 +1,12 @@
 parameters:
-  # Name of the ADO Variable Group that contains secrets:
-  # tenantId, clientId, clientSecret, (optional) teamsWebhook
-  variableGroup: 'rg-sanity-secrets'
-
+  variableGroup: 'modernization_tfstate_backend_details'
   displayName: 'Run PowerShell'
-  scriptPath: ''            # required, e.g. sanitychecks/scripts/Scan-RG-Tags.ps1
-  workingDir: ''            # optional
-  arguments: ''             # pass-through arguments for the script
-  artifactName: 'scan-out'  # artifact name
+  scriptPath: ''
+  workingDir: ''
+  arguments: ''
+  artifactName: 'scan-out'
   publishPath: '$(Build.ArtifactStagingDirectory)/scan-out'
-  ensureAz: true            # install Az modules on fresh agents
+  ensureAz: true
 
 jobs:
 - job: run_script
@@ -18,7 +15,6 @@ jobs:
     vmImage: 'windows-latest'
 
   variables:
-  # 👇 Pull secrets from the Variable Group here
   - group: ${{ parameters.variableGroup }}
 
   steps:
