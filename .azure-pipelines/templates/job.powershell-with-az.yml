@@ -1,10 +1,10 @@
 parameters:
-  variableGroup: 'modernization_tfstate_backend_details'
+  variableGroup: 'modernization_tfstate_backend_details'  # contains tenant_id, backend_client_id, backend_client_secret, teamsWebhook
   displayName: 'Run PowerShell'
-  scriptPath: ''
-  workingDir: ''
-  arguments: ''
-  artifactName: 'scan-out'
+  scriptPath: ''            # e.g. sanitychecks/scripts/Scan-RG-Tags.ps1
+  workingDir: ''            # optional
+  arguments: ''             # pass-through to the script
+  artifactName: 'scan-out'  # artifact name
   publishPath: '$(Build.ArtifactStagingDirectory)/scan-out'
   ensureAz: true
 
