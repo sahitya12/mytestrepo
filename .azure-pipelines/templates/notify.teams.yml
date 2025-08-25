@@ -1,0 +1,37 @@
+parameters:
+  variableGroup: 'modernization_tfstate_backend_details'
+  title: 'Sanity Checks Completed'
+  message: ''
+  themeColor: '0078D7'
+
+jobs:
+- job: notify_teams
+  displayName: Teams notification
+  pool:
+    vmImage: windows-latest
+
+  variables:
+  - group: ${{ parameters.variableGroup }}
+
+  steps:
+  - task: PowerShell@2
+    displayName: Post to Teams (Incoming Webhook)
+    condition: ne(variables['teamsWebhook'], '')
+    inputs:
+      targetType: inline
+      script: |
+        $payload = @{
+          '@type'    = 'MessageCard'
+          '@context' = 'http://schema.org/extensions'
+          title      = '${{ parameters.title }}'
+          text       = "$(Build.DefinitionName) #$(Build.BuildNumber) completed.`n${{ parameters.message }}"
+          themeColor = '${{ parameters.themeColor }}'
+          potentialAction = @(
+            @{
+              '@type' = 'OpenUri'
+              name    = 'Open Pipeline Run'
+              targets = @(@{ os='default'; uri = '$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)' })
+            }
+          )
+        } | ConvertTo-Json -Depth 6
+        Invoke-RestMethod -Method Post -Uri "$(teamsWebhook)" -ContentType 'application/json' -Body $payload
