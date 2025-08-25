@@ -14,6 +14,7 @@ stages:
       displayName: 'RG Tags Scan'
       scriptPath: 'sanitychecks/scripts/Scan-RG-Tags.ps1'
       workingDir: '$(Build.SourcesDirectory)/sanitychecks/scripts'
+      # The script scans only subs with ADH+custodian (CustodianFilter)
       arguments: >
         -TenantId "$(tenant_id)"
         -ClientId "$(backend_client_id)"
