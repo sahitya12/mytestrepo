@@ -1,0 +1,22 @@
+parameters:
+  run_mode: 'ByCustodian'
+  adh_group: ''
+  variableGroup: 'modernization_tfstate_backend_details'
+  outDir: '$(Build.ArtifactStagingDirectory)/kv-firewall'
+
+stages:
+- stage: KV_Firewall
+  displayName: KV Firewall (${{ parameters.run_mode }} ${{ parameters.adh_group }})
+  jobs:
+  - template: ../templates/job.powershell-with-az.yml
+    parameters:
+      variableGroup: ${{ parameters.variableGroup }}
+      displayName: 'KV Firewall Scan'
+      scriptPath: 'sanitychecks/scripts/Scan-KV-Networks.ps1'
+      workingDir: '$(Build.SourcesDirectory)/sanitychecks/scripts'
+      arguments: >
+        -TenantId "$(tenant_id)" -ClientId "$(backend_client_id)" -ClientSecret "$(backend_client_secret)"
+        ${{ if eq(parameters.run_mode, 'ByCustodian') }} -adh_group "${{ parameters.adh_group }}" ${{ else }} -ScanAll ${{ end }}
+        -OutputDir "$(Build.ArtifactStagingDirectory)/kv-firewall"
+      artifactName: 'kv-firewall'
+      publishPath: "$(Build.ArtifactStagingDirectory)/kv-firewall"
