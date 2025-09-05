@@ -1,0 +1,58 @@
+# Modernization_Terraform/sanitychecks/.azure-pipelines/pipeline.yml
+trigger: none
+
+parameters:
+- name: run_mode
+  type: string
+  default: ByCustodian
+  values: ["ByCustodian", "AllADH"]
+- name: adh_group
+  type: string
+  default: "CSM"
+
+stages:
+# RG Permissions
+- template: stages/rg-permissions.stage.yml
+  parameters:
+    adh_group: ${{ parameters.adh_group }}
+    prodCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/prod_permissions.csv'
+    nonProdCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/nonprod_permissions.csv'
+    variableGroup: 'modernization_tfstate_backend_details'
+    outDir: '$(Build.ArtifactStagingDirectory)/rg-perms'
+    teamsWebhookVar: '$(teams_webhook)'
+
+# RG Tags
+- template: stages/rg-tags.stage.yml
+  parameters:
+    adh_group: ${{ parameters.adh_group }}
+    variableGroup: 'modernization_tfstate_backend_details'
+    outDir: '$(Build.ArtifactStagingDirectory)/rg-tags'
+    teamsWebhookVar: '$(teams_webhook)'
+
+# KV Secrets (structural branch lives INSIDE the template)
+- template: stages/kv-secrets.stage.yml
+  parameters:
+    run_mode: ${{ parameters.run_mode }}
+    adh_group: ${{ parameters.adh_group }}
+    secretsCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/kvsecretsscan.csv'
+    variableGroup: 'modernization_tfstate_backend_details'
+    outDir: '$(Build.ArtifactStagingDirectory)/kv-secrets'
+    teamsWebhookVar: '$(teams_webhook)'
+
+# KV Permissions
+- template: stages/kv-permissions.stage.yml
+  parameters:
+    run_mode: ${{ parameters.run_mode }}
+    adh_group: ${{ parameters.adh_group }}
+    variableGroup: 'modernization_tfstate_backend_details'
+    outDir: '$(Build.ArtifactStagingDirectory)/kv-perms'
+    teamsWebhookVar: '$(teams_webhook)'
+
+# KV Firewall
+- template: stages/kv-firewall.stage.yml
+  parameters:
+    run_mode: ${{ parameters.run_mode }}
+    adh_group: ${{ parameters.adh_group }}
+    variableGroup: 'modernization_tfstate_backend_details'
+    outDir: '$(Build.ArtifactStagingDirectory)/kv-firewall'
+    teamsWebhookVar: '$(teams_webhook)'
