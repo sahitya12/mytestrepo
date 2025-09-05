@@ -1,0 +1,57 @@
+# Modernization_Terraform/sanitychecks/.azure-pipelines/pipeline.yml
+trigger: none
+
+parameters:
+- name: run_mode
+  displayName: Run mode
+  type: string
+  default: ByCustodian
+  values: ["ByCustodian", "AllADH"]
+- name: adh_group
+  displayName: Custodian (when ByCustodian)
+  type: string
+  default: ""
+
+stages:
+
+# --- RG Permissions (ByCustodian; your existing stage expects adh_group) ---
+- template: stages/rg-permissions.stage.yml
+  parameters:
+    adh_group: ${{ parameters.adh_group }}
+    prodCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/prod_permissions.csv'
+    nonProdCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/nonprod_permissions.csv'
+    variableGroup: 'modernization_tfstate_backend_details'
+    # simple, fixed output folder
+    outDir: '$(Build.ArtifactStagingDirectory)/rg-perms'
+
+# --- RG Tags (ByCustodian) ---
+- template: stages/rg-tags.stage.yml
+  parameters:
+    adh_group: ${{ parameters.adh_group }}
+    variableGroup: 'modernization_tfstate_backend_details'
+    outDir: '$(Build.ArtifactStagingDirectory)/rg-tags'
+
+# --- KV Secrets ---
+- template: stages/kv-secrets.stage.yml
+  parameters:
+    run_mode: ${{ parameters.run_mode }}     # 'ByCustodian' or 'AllADH'
+    adh_group: ${{ parameters.adh_group }}   # ignored by template when AllADH
+    secretsCsvPath: '$(Build.SourcesDirectory)/sanitychecks/inputs/kvsecretsscan.csv'
+    variableGroup: 'modernization_tfstate_backend_details'
+    outDir: '$(Build.ArtifactStagingDirectory)/kv-secrets'
+
+# --- KV Permissions ---
+- template: stages/kv-permissions.stage.yml
+  parameters:
+    run_mode: ${{ parameters.run_mode }}
+    adh_group: ${{ parameters.adh_group }}
+    variableGroup: 'modernization_tfstate_backend_details'
+    outDir: '$(Build.ArtifactStagingDirectory)/kv-perms'
+
+# --- KV Firewall / Networks ---
+- template: stages/kv-firewall.stage.yml
+  parameters:
+    run_mode: ${{ parameters.run_mode }}
+    adh_group: ${{ parameters.adh_group }}
+    variableGroup: 'modernization_tfstate_backend_details'
+    outDir: '$(Build.ArtifactStagingDirectory)/kv-firewall'
