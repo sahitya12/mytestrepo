@@ -38,3 +38,17 @@ $names | ForEach-Object {
 
 az storage fs access set --account-name adhisobuffadlsprd --file-system adh_isobuff --path "lz" --acl ("user:{0}:rw-" -f (az ad sp list --display-name "ADH_Ext_Databahn_SPN_prd" --query "[?displayName=='ADH_Ext_Databahn_SPN_prd'].id | [0]" -o tsv)) --auth-mode login
 
+
+# Get the SPN objectId
+$spnId = az ad sp list --display-name "ADH_Ext_Databahn_SPN_prd" --query "[0].id" -o tsv
+
+# Change ACL on /adh_isobuff/lz (filesystem=adh_isobuff, path=lz) to read+write (rw-)
+az storage fs access set --account-name adhisobuffadlsprd --file-system adh_isobuff --path "lz" --acl "user:$spnId:rw-" --auth-mode login
+
+# (Optional) if the SPN must traverse the folder, use rwx instead:
+# az storage fs access set --account-name adhisobuffadlsprd --file-system adh_isobuff --path "lz" --acl "user:$spnId:rwx" --auth-mode login
+
+
+az storage fs access show --account-name adhisobuffadlsprd --file-system adh_isobuff --path "lz" --auth-mode login
+
+
