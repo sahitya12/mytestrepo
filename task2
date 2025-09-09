@@ -10,7 +10,7 @@ if ([string]::IsNullOrWhiteSpace($targetSub)) {
   throw "TargetSubId is empty (Task 1 must run first)."
 }
 
-# Environments to check
+# Env logic:
 $envs = if ($adhSubType -eq "prd") { @("prd") } else { @("dev","tst","stg") }
 Write-Host "Subscription type: $adhSubType; Environments to check: $($envs -join ', ')"
 
@@ -18,9 +18,7 @@ Write-Host "Subscription type: $adhSubType; Environments to check: $($envs -join
 az account set --subscription $targetSub
 
 # AAD access token for Azure Databricks control plane
-$token = az account get-access-token `
-  --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d `
-  --query accessToken -o tsv
+$token = az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv
 if ([string]::IsNullOrWhiteSpace($token)) { throw "Failed to obtain AAD token for Databricks." }
 $headers = @{ Authorization = "Bearer $token" }
 
@@ -29,18 +27,31 @@ foreach ($env in $envs) {
   Write-Host "-----"
   Write-Host "Processing workspace: $wsName"
 
-  # Find Databricks workspace ARM resource
-  $ws = az resource list `
-        --resource-type Microsoft.Databricks/workspaces `
-        --query "[?name=='$wsName'] | [0]" -o json | ConvertFrom-Json
-
+  # Find the workspace ARM resource (to get its id)
+  $ws = az resource list --resource-type Microsoft.Databricks/workspaces --query "[?name=='$wsName'] | [0]" -o json | ConvertFrom-Json
   if (-not $ws) {
     Write-Host "Workspace '${wsName}' not found in subscription $targetSub. Skipping."
     continue
   }
 
-  # Use a NON-reserved name (can't use $host)
-  $dbxHost = "https://$($ws.properties.workspaceUrl)"
+  # Try to get workspaceUrl robustly (some APIs omit it in the list output)
+  $workspaceUrl = $ws.properties.workspaceUrl
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl) -and $ws.id) {
+    # Try a direct show on the resource id
+    $workspaceUrl = az resource show --ids $ws.id --query "properties.workspaceUrl" -o tsv
+  }
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl) -and $ws.id) {
+    # Some tenants keep it under parameters
+    $workspaceUrl = az resource show --ids $ws.id --query "properties.parameters.workspaceUrl.value" -o tsv
+  }
+
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl)) {
+    Write-Warning "workspaceUrl not found for ${wsName}. Skipping."
+    continue
+  }
+
+  # Construct full host
+  $dbxHost = if ($workspaceUrl -match '^https?://') { $workspaceUrl } else { "https://$workspaceUrl" }
   Write-Host "Workspace host: $dbxHost"
 
   # List warehouses
@@ -52,7 +63,7 @@ foreach ($env in $envs) {
     continue
   }
 
-  # Prefer the serverless starter; fallback to classic starter name
+  # Prefer serverless starter; fallback to classic starter
   $primaryName  = "Serverless Starter Warehouse"
   $fallbackName = "Starter Warehouse"
 
