@@ -1,0 +1,37 @@
+$names = "GIT_SSL_CAINFO","CURL_CA_BUNDLE","REQUESTS_CA_BUNDLE","SSL_CERT_FILE"
+$names | % { "$_ = " + ([Environment]::GetEnvironmentVariable($_,"User") ?? `
+                       [Environment]::GetEnvironmentVariable($_,"Machine") ?? `
+                       [Environment]::GetEnvironmentVariable($_,"Process")) }
+
+
+C:\Program Files\Git\usr\ssl\certs\ca-bundle.crt
+$bundle = "C:\Program Files\Git\usr\ssl\certs\ca-bundle.crt"
+
+# Update only if the file exists
+if(-not (Test-Path $bundle)){ throw "Git CA bundle not found at: $bundle" }
+
+[Environment]::SetEnvironmentVariable("GIT_SSL_CAINFO",$bundle,"User")
+[Environment]::SetEnvironmentVariable("CURL_CA_BUNDLE",$bundle,"User")
+[Environment]::SetEnvironmentVariable("GIT_SSL_CAINFO",$bundle,"Machine")
+[Environment]::SetEnvironmentVariable("CURL_CA_BUNDLE",$bundle,"Machine")
+
+  
+$scopes = "User","Machine"
+foreach($s in $scopes){
+  [Environment]::SetEnvironmentVariable("GIT_SSL_CAINFO",$null,$s)
+  [Environment]::SetEnvironmentVariable("CURL_CA_BUNDLE",$null,$s)
+  [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE",$null,$s)
+  [Environment]::SetEnvironmentVariable("SSL_CERT_FILE",$null,$s)
+}
+
+az config get core.ca_cert
+_----------------------
+
+# PowerShell
+$names = "SSL_CERT_FILE","REQUESTS_CA_BUNDLE","CURL_CA_BUNDLE","GIT_SSL_CAINFO"
+$names | ForEach-Object {
+  "{0} = {1}" -f $_,[Environment]::GetEnvironmentVariable($_,"Process") ??
+                    [Environment]::GetEnvironmentVariable($_,"User") ??
+                    [Environment]::GetEnvironmentVariable($_,"Machine")
+}
+
