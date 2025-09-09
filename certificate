@@ -24,6 +24,9 @@ foreach($s in $scopes){
   [Environment]::SetEnvironmentVariable("SSL_CERT_FILE",$null,$s)
 }
 
+az storage fs access set --account-name adhisobuffadlsprd --file-system adh_isobuff --path "lz" --acl "user:<spnObjectId>:rw-" --auth-mode login
+
+
 az config get core.ca_cert
 _----------------------
 
