@@ -35,3 +35,6 @@ $names | ForEach-Object {
                     [Environment]::GetEnvironmentVariable($_,"Machine")
 }
 
+
+az storage fs access set --account-name adhisobuffadlsprd --file-system adh_isobuff --path "lz" --acl ("user:{0}:rw-" -f (az ad sp list --display-name "ADH_Ext_Databahn_SPN_prd" --query "[?displayName=='ADH_Ext_Databahn_SPN_prd'].id | [0]" -o tsv)) --auth-mode login
+
