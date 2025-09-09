@@ -10,20 +10,17 @@ if ([string]::IsNullOrWhiteSpace($targetSub)) {
   throw "TargetSubId is empty (Task 1 must run first)."
 }
 
-# Env logic:
-#   prd    -> only 'prd'
-#   nonprd -> check 'dev', 'tst', 'stg' (operate on whichever exist)
+# Environments to check
 $envs = if ($adhSubType -eq "prd") { @("prd") } else { @("dev","tst","stg") }
 Write-Host "Subscription type: $adhSubType; Environments to check: $($envs -join ', ')"
 
 # Switch to the resolved subscription
 az account set --subscription $targetSub
 
-# Get AAD access token for Azure Databricks control plane (well-known app ID)
+# AAD access token for Azure Databricks control plane
 $token = az account get-access-token `
   --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d `
   --query accessToken -o tsv
-
 if ([string]::IsNullOrWhiteSpace($token)) { throw "Failed to obtain AAD token for Databricks." }
 $headers = @{ Authorization = "Bearer $token" }
 
@@ -42,12 +39,12 @@ foreach ($env in $envs) {
     continue
   }
 
-  # Control-plane host URL (e.g., https://adb-xxxxxxxxxxxx.y.azuredatabricks.net)
-  $host = "https://$($ws.properties.workspaceUrl)"
-  Write-Host "Workspace host: $host"
+  # Use a NON-reserved name (can't use $host)
+  $dbxHost = "https://$($ws.properties.workspaceUrl)"
+  Write-Host "Workspace host: $dbxHost"
 
   # List warehouses
-  $listUri = "$host/api/2.0/sql/warehouses"
+  $listUri = "$dbxHost/api/2.0/sql/warehouses"
   try {
     $resp = Invoke-RestMethod -Method GET -Uri $listUri -Headers $headers -ErrorAction Stop
   } catch {
@@ -71,7 +68,7 @@ foreach ($env in $envs) {
   }
 
   # Delete it (idempotent; ignore 404)
-  $delUri = "$host/api/2.0/sql/warehouses/$($starter.id)"
+  $delUri = "$dbxHost/api/2.0/sql/warehouses/$($starter.id)"
   Write-Host "Deleting warehouse '$($starter.name)' (id: $($starter.id)) in ${wsName}"
   try {
     Invoke-RestMethod -Method DELETE -Uri $delUri -Headers $headers -ErrorAction Stop | Out-Null
