@@ -1,29 +1,44 @@
-Task 1 — PowerShell (resolve subscription ID)
+Task 1 — PowerShell (resolve subscription ID with new key)
 
 Display name: Resolve subscription ID
 Script Type: Inline
 
-# Build the key: ADH_<adh_group>_<adh_subscription_type>_subscription_id
-$adhGroup = "$(adh_group)"
+# Inputs
+$adhGroup   = "$(adh_group)"
 $adhSubType = "$(adh_subscription_type)"   # prd | nonprd
 
 if ([string]::IsNullOrWhiteSpace($adhGroup) -or [string]::IsNullOrWhiteSpace($adhSubType)) {
   throw "adh_group or adh_subscription_type is empty."
 }
 
-$key = "ADH_{0}_{1}_subscription_id" -f $adhGroup, $adhSubType
-Write-Host "Looking up variable key: $key (linked variable groups)"
+# New naming: <adh_group>_<adh_subscription_type>_subscription_id
+$key = "{0}_{1}_subscription_id" -f $adhGroup, $adhSubType
+Write-Host "Looking up variable key: $key (from linked variable groups)"
 
 # Variable groups expose vars as environment variables
 $subId = (Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue).Value
 if (-not $subId) {
-  throw "No subscription ID found for '$key'. Check variable groups."
+  throw "No subscription ID found for '$key'. Check your variable groups."
 }
 
 Write-Host "Resolved subscription: $subId"
 Write-Host "##vso[task.setvariable variable=TargetSubId]$subId"
 
-Task 2 — Azure CLI (PowerShell Core)
+
+Ensure both variable groups are linked to the stage:
+
+moderanization_terraform_subscription_details
+
+test_moderanization_terraform_subscription_details
+And they contain keys like FI_prd_subscription_id, FI_nonprd_subscription_id, etc.
+
+Task 2 — Azure CLI (PowerShell Core) — unchanged logic
+
+Deletes Serverless Starter Warehouse (fallback to Starter Warehouse) in all applicable workspaces:
+
+If adh_subscription_type=prd → checks ADH_<adh_group>_prd
+
+If adh_subscription_type=nonprd → checks ADH_<adh_group>_{dev,tst,stg} and deletes in whichever exist
 
 Display name: Delete Databricks Serverless Starter Warehouse(s)
 Azure subscription: your fixed service connection
@@ -41,33 +56,30 @@ if ([string]::IsNullOrWhiteSpace($targetSub)) {
   throw "TargetSubId is empty (Task 1 must run first)."
 }
 
-# Pick environments: prd → ['prd']; nonprd → ['dev','tst','stg']
+# Environments to check
 $envs = if ($adhSubType -eq "prd") { @("prd") } else { @("dev","tst","stg") }
 Write-Host "Subscription type: $adhSubType; Environments to check: $($envs -join ', ')"
 
 # Switch to the resolved subscription
 az account set --subscription $targetSub
 
-# Get AAD access token for Azure Databricks control plane (well-known app ID)
+# AAD access token for Azure Databricks control plane
 $token = az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv
 if ([string]::IsNullOrWhiteSpace($token)) { throw "Failed to obtain AAD token for Databricks." }
 $headers = @{ Authorization = "Bearer $token" }
 
-# For each env, workspace name is ADH_<adh_group>_<env>; if workspace exists, delete the (Serverless) Starter Warehouse
 foreach ($env in $envs) {
   $wsName = "ADH_{0}_{1}" -f $adhGroup, $env
   Write-Host "-----"
   Write-Host "Processing workspace: $wsName"
 
-  # Find Databricks workspace resource in this subscription
+  # Find workspace
   $ws = az resource list --resource-type Microsoft.Databricks/workspaces --query "[?name=='$wsName'] | [0]" -o json | ConvertFrom-Json
-
   if (-not $ws) {
     Write-Host "Workspace '$wsName' not found in subscription $targetSub. Skipping."
     continue
   }
 
-  # Build control-plane host URL, e.g., https://adb-xxxxxxxxxxxx.y.azuredatabricks.net
   $host = "https://$($ws.properties.workspaceUrl)"
   Write-Host "Workspace host: $host"
 
@@ -80,7 +92,7 @@ foreach ($env in $envs) {
     continue
   }
 
-  # Target names: prefer 'Serverless Starter Warehouse', fallback to 'Starter Warehouse'
+  # Prefer serverless name, fallback to classic
   $primaryName  = "Serverless Starter Warehouse"
   $fallbackName = "Starter Warehouse"
 
@@ -95,7 +107,7 @@ foreach ($env in $envs) {
     continue
   }
 
-  # Delete it (idempotent; ignore 404)
+  # Delete (idempotent; ignore 404)
   $delUri = "$host/api/2.0/sql/warehouses/$($starter.id)"
   Write-Host "Deleting warehouse '$($starter.name)' (id: $($starter.id)) in $wsName"
   try {
@@ -113,16 +125,6 @@ foreach ($env in $envs) {
 Write-Host "-----"
 Write-Host "Completed checks for environments: $($envs -join ', ')"
 
-What changed vs your earlier setup
+Quick checklist
 
-Variable name: subscription_type → adh_subscription_type
-
-Envs handled:
-
-adh_subscription_type=prd → operates only on ADH_<adh_group>_prd
-
-adh_subscription_type=nonprd → iterates ADH_<adh_group>_dev, ADH_<adh_group>_tst, ADH_<adh_group>_stg and deletes in whichever exist
-
-Subscription key: still ADH_<adh_group>_<adh_subscription_type>_subscription_id in your linked variable groups
-
-That’s all you need—paste these two updated tasks into your existing stage.
+Release variables:
