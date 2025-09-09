@@ -1,0 +1,517 @@
+Here’s a clear, click-by-click guide to add a new stage in a Classic Release pipeline that removes the “Serverless Starter Warehouse” after your Databricks deployment.
+
+0) One-time prerequisites
+
+Service connection: Ensure you have one Azure RM service connection in the same tenant (any subscription). We’ll bind the CLI task to this and switch to the target subscription in-script.
+
+Variable group: Create/verify a variable group named moderanization_terraform_subscription_details with keys like:
+
+ADH_FI_prd_subscription_id = <GUID>
+
+ADH_FI_dev_subscription_id = <GUID>
+
+Permissions: The service connection’s SPN should:
+
+Have Reader (or higher) on each target subscription (to find the workspace).
+
+Be added to the Databricks workspace with rights to delete SQL Warehouses (Workspace Admin is simplest).
+
+1) Open and edit your Release pipeline
+
+Azure DevOps → Pipelines → Releases → your release pipeline → Edit.
+
+2) Add a new stage
+
+Click + Add a stage (top-right).
+
+Choose Empty job.
+
+Name it (e.g.) Post-Deploy: Remove Starter Warehouse.
+
+(Optional) Add pre-deployment approvals or gates as per your process.
+
+3) Link the variable group & set release variables
+
+In the release pipeline editor, select Variables (top bar).
+
+Go to Variable groups → Link variable group → choose moderanization_terraform_subscription_details → Link.
+
+In Variables tab (pipeline or stage scope), add/confirm:
+
+adh_group → e.g., FI
+
+subscription_type → e.g., prd
+(You can also set these at Stage variables if they differ per stage.)
+
+4) Configure the new stage’s Agent job
+
+Click your new stage → 1 job, 0 tasks.
+
+In Agent job:
+
+Agent pool: e.g., Azure Pipelines
+
+Agent Specification: windows-latest (recommended for PowerShell Core)
+
+(Leave demands empty unless you need them.)
+
+5) Task 1 — PowerShell (resolve subscription ID)
+
+This builds the key ADH_<adh_group>_<subscription_type>_subscription_id and exposes $(TargetSubId).
+
+Click + on the job → add PowerShell task.
+
+Display name: Resolve subscription ID
+
+Type: Inline
+
+Script (paste):
+
+# Build the key name: ADH_<adh_group>_<subscription_type>_subscription_id
+$adhGroup = "$(adh_group)"
+$subType  = "$(subscription_type)"
+
+if ([string]::IsNullOrWhiteSpace($adhGroup) -or [string]::IsNullOrWhiteSpace($subType)) {
+  throw "adh_group or subscription_type is empty."
+}
+
+$key = "ADH_{0}_{1}_subscription_id" -f $adhGroup, $subType
+Write-Host "Looking up variable group key: $key"
+
+# Variable group vars are exposed as environment variables
+$subId = (Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue).Value
+if (-not $subId) {
+  throw "No subscription ID found for '$key' in variable group 'moderanization_terraform_subscription_details'."
+}
+
+Write-Host "Resolved subscription: $subId"
+Write-Host "##vso[task.setvariable variable=TargetSubId]$subId"
+
+
+Save.
+
+6) Task 2 — Azure CLI (delete “Serverless Starter Warehouse”)
+
+This switches to $(TargetSubId), finds the workspace ADH_<adh_group>_<subscription_type>, gets an AAD token for Databricks, and deletes the target warehouse.
+
+Add Azure CLI task.
+
+Display name: Delete Databricks Serverless Starter Warehouse
+
+Azure subscription: pick your fixed Azure RM service connection.
+
+Script Type: PowerShell Core
+
+Inline Script (paste):
+
+# Compose workspace name: ADH_<adh_group>_<subscription_type>
+$adhGroup = "$(adh_group)"
+$subType  = "$(subscription_type)"
+$wsName   = "ADH_{0}_{1}" -f $adhGroup, $subType
+Write-Host "Databricks workspace name: $wsName"
+
+# Switch to the target subscription (resolved in Task 1)
+$targetSub = "$(TargetSubId)"
+if ([string]::IsNullOrWhiteSpace($targetSub)) { throw "TargetSubId is empty." }
+az account set --subscription $targetSub
+
+# Find Databricks workspace resource
+$ws = az resource list --resource-type Microsoft.Databricks/workspaces --query "[?name=='$wsName'] | [0]" -o json | ConvertFrom-Json
+if (-not $ws) { Write-Host "Workspace '$wsName' not found. Skipping."; exit 0 }
+
+# Control-plane host URL
+$host = "https://$($ws.properties.workspaceUrl)"
+Write-Host "Workspace host: $host"
+
+# AAD token for Azure Databricks audience (well-known app ID)
+$token = az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv
+if ([string]::IsNullOrWhiteSpace($token)) { throw "Failed to obtain AAD token for Databricks." }
+$headers = @{ Authorization = "Bearer $token" }
+
+# List warehouses
+$listUri = "$host/api/2.0/sql/warehouses"
+$resp = Invoke-RestMethod -Method GET -Uri $listUri -Headers $headers -ErrorAction Stop
+
+# Target primary name + fallback
+$primaryName  = "Serverless Starter Warehouse"
+$fallbackName = "Starter Warehouse"
+
+$starter = $resp.warehouses | Where-Object { $_.name -eq $primaryName } | Select-Object -First 1
+if (-not $starter) {
+  Write-Host "'$primaryName' not found; checking '$fallbackName' as fallback."
+  $starter = $resp.warehouses | Where-Object { $_.name -eq $fallbackName } | Select-Object -First 1
+}
+
+if (-not $starter) {
+  Write-Host "No Serverless/Starter Warehouse found. Nothing to delete."
+  exit 0
+}
+
+# Delete it (idempotent; ignore 404)
+$delUri = "$host/api/2.0/sql/warehouses/$($starter.id)"
+Write-Host "Deleting warehouse '$($starter.name)' (id: $($starter.id))"
+try {
+  Invoke-RestMethod -Method DELETE -Uri $delUri -Headers $headers -ErrorAction Stop | Out-Null
+  Write-Host "Deleted '$($starter.name)'."
+} catch {
+  if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 404) {
+    Write-Host "'$($starter.name)' already deleted (404)."
+  } else {
+    throw
+  }
+}
+
+7) (Optional) Verification task
+
+Add another Azure CLI (PowerShell Core) to list remaining warehouses (nice for logs):
+
+$adhGroup = "$(adh_group)"
+$subType  = "$(subscription_type)"
+$wsName   = "ADH_{0}_{1}" -f $adhGroup, $subType
+
+az account set --subscription "$(TargetSubId)"
+
+$ws = az resource list --resource-type Microsoft.Databricks/workspaces --query "[?name=='$wsName'] | [0]" -o json | ConvertFrom-Json
+if (-not $ws) { Write-Host "Workspace not found; skipping."; exit 0 }
+
+$host  = "https://$($ws.properties.workspaceUrl)"
+$token = az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv
+$headers = @{ Authorization = "Bearer $token" }
+$listUri = "$host/api/2.0/sql/warehouses"
+
+try {
+  $resp = Invoke-RestMethod -Method GET -Uri $listUri -Headers $headers -ErrorAction Stop
+  Write-Host "Warehouses after deletion:"
+  $resp.warehouses | Select-Object name, id, state | Format-Table | Out-String | Write-Host
+} catch {
+  Write-Warning "Failed to list warehouses: $($_.Exception.Message)"
+}
+
+8) Save, create a new release, and test
+
+Queue a release with adh_group & subscription_type set.
+
+Check logs:
+
+Task 1: should print Resolved subscription: <GUID>.
+
+Task 2: should print workspace host and “Deleted 'Serverless Starter Warehouse'.” (or “already deleted”).
+
+If you want this stage to run only for a certain environment (e.g., subscription_type == prd), I can add the stage/task conditions for you.
+
+You said:
+add one more variable group test_moderanization_terraform_subscription_details
+ChatGPT said:
+
+Perfect 👍 You now want two variable groups that can hold subscription mappings:
+
+moderanization_terraform_subscription_details
+
+test_moderanization_terraform_subscription_details
+
+…and have the pipeline/stage pick from both.
+
+Step-by-step update
+1. Create/verify the new variable group
+
+Go to Pipelines → Library → Variable groups.
+
+Create test_moderanization_terraform_subscription_details.
+
+Add keys in the same pattern:
+
+ADH_<adh_group>_<subscription_type>_subscription_id
+
+
+Example:
+
+ADH_FI_test_subscription_id = <GUID-of-test-sub>
+
+2. Link both variable groups to the Release stage
+
+Edit your Release pipeline.
+
+In the stage you created (Remove Starter Warehouse), go to Variables tab.
+
+Under Variable groups, link both:
+
+moderanization_terraform_subscription_details
+
+test_moderanization_terraform_subscription_details
+
+This makes both groups’ keys available as environment variables.
+
+3. Update Task 1 – PowerShell script
+
+Change the script to look in either group. The good news: in Classic Release, once both groups are linked, all keys are in the environment. That means you don’t have to change the lookup logic — it already works, because the script just does:
+
+$key = "ADH_{0}_{1}_subscription_id" -f $adhGroup, $subType
+$subId = (Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue).Value
+
+
+As long as the right group is linked (test vs prod), the variable will be found.
+
+4. How to control which group to use
+
+If you link both groups, and both have the same key, the one listed last when linking will win.
+
+Safer approach:
+
+Use different subscription_type values to distinguish (e.g., prd, dev, test).
+
+Your release variable subscription_type decides which key is looked up.
+
+Example:
+
+For test: adh_group=FI, subscription_type=test → script will read ADH_FI_test_subscription_id (from the test group).
+
+For prod: adh_group=FI, subscription_type=prd → script will read ADH_FI_prd_subscription_id (from the prod group).
+
+✅ Summary
+
+You add the second variable group.
+
+Link both to the stage.
+
+No code changes needed, as long as your subscription_type value matches the right keys.
+
+👉 Do you want me to rewrite Task 1’s script so it prints which variable group it resolved the key from (to make logs clearer when both groups are linked)?
+
+You said:
+give me all the step by step to add a stage in release pipeline
+ChatGPT said:
+Thought for 8s
+
+awesome — here’s a complete, click-by-click guide to add a new stage in a Classic Release pipeline that deletes the Databricks “Serverless Starter Warehouse” right after your workspace deployment. It supports two variable groups:
+
+moderanization_terraform_subscription_details
+
+test_moderanization_terraform_subscription_details
+
+…and uses your release variables adh_group and subscription_type to target the right subscription and workspace.
+
+0) One-time prerequisites
+
+Azure service connection (fixed):
+Create (or pick) one Azure RM service connection in your ADO project. We’ll bind the Azure CLI task to this and switch to the target subscription in the script.
+
+Permissions required:
+
+The service connection’s SPN must have at least Reader on the target subscriptions (to read the workspace).
+
+Add the SPN to the Databricks workspace with rights to manage SQL Warehouses (best: Workspace Admin).
+
+Variable groups (two):
+
+moderanization_terraform_subscription_details
+
+test_moderanization_terraform_subscription_details
+
+In each group, add keys using this exact pattern:
+
+ADH_<adh_group>_<subscription_type>_subscription_id = <SUBSCRIPTION-GUID>
+
+
+Examples:
+
+ADH_FI_prd_subscription_id = 00000000-0000-0000-0000-000000000000
+
+ADH_FI_test_subscription_id = 11111111-1111-1111-1111-111111111111
+
+Tip: use different subscription_type values (prd, test, dev, …). The script will read the key that matches the release variables you set for that run.
+
+1) Open your Release pipeline
+
+Azure DevOps → Pipelines → Releases → select your pipeline → Edit.
+
+2) Add a new stage
+
+Click + Add a stage → choose Empty job.
+
+Name it (e.g.) Post-Deploy: Remove Starter Warehouse.
+
+(Optional) Configure pre-deployment approvals as per your process.
+
+3) Link variable groups & set release variables
+
+In the top bar, open Variables.
+
+Variable groups → Link variable group → link both:
+
+moderanization_terraform_subscription_details
+
+test_moderanization_terraform_subscription_details
+
+In Variables (pipeline or this stage), define:
+
+adh_group → e.g., FI
+
+subscription_type → e.g., prd (or test, depending on the environment)
+
+If both groups contain the same key, the last-linked group can override. Safer: use distinct subscription_type values so the script picks the correct key.
+
+4) Configure the Agent job for the new stage
+
+Click your new stage → 1 job, 0 tasks.
+
+Agent pool: Azure Pipelines
+
+Agent specification: windows-latest (PowerShell Core available)
+
+5) Task 1 — PowerShell (resolve subscription ID)
+
+Purpose: Build the key ADH_<adh_group>_<subscription_type>_subscription_id, read it from the linked variable groups, and expose $(TargetSubId) for the next task.
+
+Click + on the job → add PowerShell.
+
+Display name: Resolve subscription ID
+
+Type: Inline
+
+Script (paste):
+
+# Build the key name: ADH_<adh_group>_<subscription_type>_subscription_id
+$adhGroup = "$(adh_group)"
+$subType  = "$(subscription_type)"
+
+if ([string]::IsNullOrWhiteSpace($adhGroup) -or [string]::IsNullOrWhiteSpace($subType)) {
+  throw "adh_group or subscription_type is empty."
+}
+
+$key = "ADH_{0}_{1}_subscription_id" -f $adhGroup, $subType
+Write-Host "Looking up variable key: $key (linked variable groups)"
+
+# Variable groups expose vars as environment variables
+$subId = (Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue).Value
+if (-not $subId) {
+  throw "No subscription ID found for '$key'. Check variable groups."
+}
+
+Write-Host "Resolved subscription: $subId"
+Write-Host "##vso[task.setvariable variable=TargetSubId]$subId"
+
+6) Task 2 — Azure CLI (delete “Serverless Starter Warehouse”)
+
+Purpose:
+Switch to $(TargetSubId), find workspace ADH_<adh_group>_<subscription_type>, get an AAD token for the Azure Databricks audience, and delete the “Serverless Starter Warehouse” (fallback to “Starter Warehouse” if present).
+
+Add Azure CLI task.
+
+Display name: Delete Databricks Serverless Starter Warehouse
+
+Azure subscription: select your fixed Azure RM service connection (from step 0).
+
+Script Type: PowerShell Core
+
+Inline Script (paste):
+
+# Compose workspace name: ADH_<adh_group>_<subscription_type>
+$adhGroup = "$(adh_group)"
+$subType  = "$(subscription_type)"
+$wsName   = "ADH_{0}_{1}" -f $adhGroup, $subType
+Write-Host "Databricks workspace name: $wsName"
+
+# Switch to target subscription
+$targetSub = "$(TargetSubId)"
+if ([string]::IsNullOrWhiteSpace($targetSub)) { throw "TargetSubId is empty." }
+az account set --subscription $targetSub
+
+# Find Databricks workspace ARM resource
+$ws = az resource list --resource-type Microsoft.Databricks/workspaces --query "[?name=='$wsName'] | [0]" -o json | ConvertFrom-Json
+if (-not $ws) { Write-Host "Workspace '$wsName' not found in $targetSub. Skipping."; exit 0 }
+
+# Build control-plane host URL, e.g., https://adb-xxxxxxxxxxxx.y.azuredatabricks.net
+$host = "https://$($ws.properties.workspaceUrl)"
+Write-Host "Workspace host: $host"
+
+# Get AAD access token for Azure Databricks control-plane audience
+# Well-known AAD App ID for Azure Databricks: 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d
+$token = az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv
+if ([string]::IsNullOrWhiteSpace($token)) { throw "Failed to obtain AAD token for Databricks." }
+$headers = @{ Authorization = "Bearer $token" }
+
+# List warehouses and target the Serverless starter (fallback to classic name)
+$listUri = "$host/api/2.0/sql/warehouses"
+$resp = Invoke-RestMethod -Method GET -Uri $listUri -Headers $headers -ErrorAction Stop
+
+$primaryName  = "Serverless Starter Warehouse"
+$fallbackName = "Starter Warehouse"
+
+$starter = $resp.warehouses | Where-Object { $_.name -eq $primaryName } | Select-Object -First 1
+if (-not $starter) {
+  Write-Host "'$primaryName' not found; checking '$fallbackName'."
+  $starter = $resp.warehouses | Where-Object { $_.name -eq $fallbackName } | Select-Object -First 1
+}
+
+if (-not $starter) {
+  Write-Host "No Serverless/Starter Warehouse found. Nothing to delete."
+  exit 0
+}
+
+# Delete it (idempotent; ignore 404)
+$delUri = "$host/api/2.0/sql/warehouses/$($starter.id)"
+Write-Host "Deleting warehouse '$($starter.name)' (id: $($starter.id))"
+try {
+  Invoke-RestMethod -Method DELETE -Uri $delUri -Headers $headers -ErrorAction Stop | Out-Null
+  Write-Host "Deleted '$($starter.name)'."
+} catch {
+  if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 404) {
+    Write-Host "'$($starter.name)' already deleted (404)."
+  } else {
+    throw
+  }
+}
+
+7) (Optional) Task 3 — verify remaining warehouses
+
+Add another Azure CLI (PowerShell Core) to list what remains (for logs):
+
+$adhGroup = "$(adh_group)"
+$subType  = "$(subscription_type)"
+$wsName   = "ADH_{0}_{1}" -f $adhGroup, $subType
+
+az account set --subscription "$(TargetSubId)"
+
+$ws = az resource list --resource-type Microsoft.Databricks/workspaces --query "[?name=='$wsName'] | [0]" -o json | ConvertFrom-Json
+if (-not $ws) { Write-Host "Workspace not found; skipping."; exit 0 }
+
+$host  = "https://$($ws.properties.workspaceUrl)"
+$token = az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv
+$headers = @{ Authorization = "Bearer $token" }
+$listUri = "$host/api/2.0/sql/warehouses"
+
+try {
+  $resp = Invoke-RestMethod -Method GET -Uri $listUri -Headers $headers -ErrorAction Stop
+  Write-Host "Warehouses after deletion:"
+  $resp.warehouses | Select-Object name, id, state | Format-Table | Out-String | Write-Host
+} catch {
+  Write-Warning "Failed to list warehouses: $($_.Exception.Message)"
+}
+
+8) Save, create a release, and test
+
+Create new release with appropriate adh_group and subscription_type.
+
+Check logs:
+
+Task 1 prints: Resolved subscription: <GUID>
+
+Task 2 prints the workspace host and either:
+
+Deleted 'Serverless Starter Warehouse'., or
+
+No Serverless/Starter Warehouse found. Nothing to delete.
+
+Tips & troubleshooting
+
+Key not found: Ensure your variable groups contain the correctly spelled key ADH_<adh_group>_<subscription_type>_subscription_id and both groups are linked to the stage.
+
+Workspace not found: Confirm the workspace really is named ADH_<adh_group>_<subscription_type> and exists in that subscription.
+
+Auth errors: Ensure the service connection’s SPN has the subscription access and is added to the Databricks workspace (Workspace Admin for simplicity).
+
+Run only for specific env: Add a stage condition (e.g., run only when subscription_type equals prd).
+
+That’s everything needed end-to-end. If you want me to add a stage condition or approvals template, say the word and I’ll slot it in.
+
+ChatGPT can make mistakes. Check i
