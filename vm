@@ -33,3 +33,15 @@ dynamic "storage_data_disk" {
       managed_disk_type = storage_data_disk.value.storage_account_type
     }
 }
+
+
+
+# OPTIONAL – if not provided, module skips data disk creation
+    data_disks = optional(list(object({
+      name                 = optional(string)
+      size_gb              = number
+      lun                  = number
+      storage_account_type = string
+      caching              = optional(string, "ReadOnly")
+      create_option        = optional(string, "Empty")
+    })), [])
