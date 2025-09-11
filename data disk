@@ -1,0 +1,40 @@
+# OPTIONAL: if omitted or empty => no data disks created/attached
+variable "data_disks" {
+  type = list(object({
+    name                 = optional(string)
+    size_gb              = number
+    lun                  = number                      # unique per VM
+    storage_account_type = string                      # e.g. Premium_LRS
+    caching              = optional(string, "ReadOnly")
+    create_option        = optional(string, "Empty")
+  }))
+  default = []
+}
+
+
+locals {
+  data_disks_by_lun = { for dd in var.data_disks : dd.lun => dd }
+}
+
+resource "azurerm_managed_disk" "data" {
+  for_each             = local.data_disks_by_lun
+  name                 = coalesce(each.value.name, "${var.name}-data-${each.key}")
+  resource_group_name  = var.resource_group_name
+  location             = var.location
+  storage_account_type = each.value.storage_account_type
+  create_option        = each.value.create_option
+  disk_size_gb         = each.value.size_gb
+  tags                 = var.tags
+}
+
+
+dynamic "storage_data_disk" {
+    for_each = { for dd in var.data_disks : dd.lun => dd } # empty => no block
+    content {
+      name              = coalesce(storage_data_disk.value.name, "${var.name}-data-${storage_data_disk.key}")
+      lun               = storage_data_disk.key
+      disk_size_gb      = storage_data_disk.value.size_gb
+      caching           = coalesce(try(storage_data_disk.value.caching, null), "ReadOnly")
+      create_option     = coalesce(try(storage_data_disk.value.create_option, null), "Empty")
+      managed_disk_type = storage_data_disk.value.storage_account_type
+    }
