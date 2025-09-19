@@ -3,3 +3,11 @@ az keyvault secret list --vault-name <YourKeyVaultName> --query "[].{name:name, 
 az keyvault secret list --vault-name <YourKeyVaultName> --query "[].name" -o tsv | xargs -I{} az keyvault secret show --vault-name <YourKeyVaultName> --name {} --query "{name:name, value:value}" -o json | \
   jq -s '.' > secrets.json
 
+$secrets = @()
+
+az keyvault secret list --vault-name "<YourKeyVaultName>" --query "[].name" -o tsv | ForEach-Object {
+    $secretValue = az keyvault secret show --vault-name "<YourKeyVaultName>" --name $_ --query "value" -o tsv
+    $secrets += [PSCustomObject]@{ name = $_; value = $secretValue }
+}
+
+$secrets | ConvertTo-Json | Out-File "secrets.json" -Encoding utf8
