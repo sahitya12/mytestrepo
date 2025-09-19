@@ -1,0 +1,1 @@
+az keyvault secret list --vault-name <YourKeyVaultName> --query "[].{name:name, value:value}" -o json > secrets.json
