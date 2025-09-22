@@ -1,0 +1,196 @@
+Modules/SPN/variables.tf
+variable "sp_name" {
+  description = "Optional custom name for the AAD Application / Service Principal"
+  type        = string
+  default     = null
+}
+
+variable "adh_group" {
+  type        = string
+  description = "ADH group, e.g. KTK"
+}
+
+variable "adh_sub_group" {
+  type        = string
+  description = "Optional sub-group, leave empty string if none"
+  default     = ""
+}
+
+variable "adh_group_subscription_type" {
+  type        = string
+  description = "Subscription type: prd | nonprd"
+}
+
+variable "sp_owners" {
+  type        = list(string)
+  description = "Owner UPNs for the application/SP"
+  default     = []
+}
+
+variable "kv_name" {
+  type        = string
+  description = "Key Vault name"
+}
+
+variable "kv_rg_name" {
+  type        = string
+  description = "Key Vault resource group name"
+}
+
+variable "kv_secret_name" {
+  type        = string
+  description = "Secret name to store the app password"
+}
+
+Modules/SPN/data.tf
+# Current authenticated principal (added as owner)
+data "azurerm_client_config" "current" {}
+
+# Resolve unique owner UPNs -> user object IDs
+data "azuread_user" "app_owners" {
+  for_each               = toset(var.sp_owners)
+  user_principal_name    = each.value
+}
+
+# Key Vault lookup
+data "azurerm_key_vault" "kv" {
+  name                = var.kv_name
+  resource_group_name = var.kv_rg_name
+}
+
+Modules/SPN/main.tf
+terraform {
+  required_providers {
+    azuread = {
+      source  = "hashicorp/azuread"
+      version = ">= 2.48.0"
+    }
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = ">= 3.100.0"
+    }
+  }
+}
+
+locals {
+  # Generate default SPN/Application name if custom not provided
+  generated_sp_name = var.adh_sub_group == ""
+    ? format("ADH_%s_Gen_SPN_%s", upper(var.adh_group), lower(var.adh_group_subscription_type))
+    : format("ADH_%s_%s_Gen_SPN_%s", upper(var.adh_group), upper(var.adh_sub_group), lower(var.adh_group_subscription_type))
+
+  effective_sp_name = coalesce(var.sp_name, local.generated_sp_name)
+
+  # Final owners list as GUIDs (NO /users/... strings)
+  app_owner_ids = distinct(concat(
+    [data.azurerm_client_config.current.object_id],
+    [for u in data.azuread_user.app_owners : u.id]
+  ))
+}
+
+resource "azuread_application" "app" {
+  display_name = local.effective_sp_name
+  owners       = local.app_owner_ids
+}
+
+resource "azuread_service_principal" "sp" {
+  client_id                    = azuread_application.app.client_id
+  app_role_assignment_required = false
+  owners                       = local.app_owner_ids
+}
+
+resource "azuread_application_password" "app_secret" {
+  display_name          = format("%s-Secret", local.effective_sp_name)
+  application_object_id = azuread_application.app.object_id
+  # 17520h = 2 years (adjust if needed)
+  end_date              = timeadd(timestamp(), "17520h")
+}
+
+resource "azurerm_key_vault_secret" "kv_secret" {
+  name            = var.kv_secret_name
+  value           = azuread_application_password.app_secret.value
+  expiration_date = azuread_application_password.app_secret.end_date
+  key_vault_id    = data.azurerm_key_vault.kv.id
+
+  lifecycle {
+    ignore_changes = [expiration_date]
+  }
+}
+
+Modules/SPN/deployTest/providers.tf
+terraform {
+  required_providers {
+    azuread = {
+      source  = "hashicorp/azuread"
+      version = ">= 2.48.0"
+    }
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = ">= 3.100.0"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+}
+
+provider "azuread" {}
+
+Modules/SPN/deployTest/variables.tf
+# Drive multiple SPNs with for_each
+variable "spn" {
+  type = map(object({
+    adh_group                   = string
+    adh_sub_group               = optional(string, "")
+    adh_group_subscription_type = string                # prd | nonprd
+    sp_owners                   = list(string)
+
+    # Optional custom SPN/Application name (if null, module generates it)
+    sp_name        = optional(string, null)
+
+    kv_name        = string
+    kv_rg_name     = string
+    kv_secret_name = string
+  }))
+}
+
+Modules/SPN/deployTest/main.tf
+module "spn" {
+  source   = "../"
+  for_each = var.spn
+
+  sp_name                     = try(each.value.sp_name, null)           # optional custom name
+  adh_group                   = each.value.adh_group
+  adh_sub_group               = try(each.value.adh_sub_group, "")
+  adh_group_subscription_type = each.value.adh_group_subscription_type
+  sp_owners                   = each.value.sp_owners
+
+  kv_name        = each.value.kv_name
+  kv_rg_name     = each.value.kv_rg_name
+  kv_secret_name = each.value.kv_secret_name
+}
+
+Example terraform.tfvars (deployTest)
+spn = {
+  ktk-nonprd = {
+    adh_group                   = "KTK"
+    adh_sub_group               = ""
+    adh_group_subscription_type = "nonprd"
+    sp_owners                   = ["alice@contoso.com", "bob@contoso.com"]
+    sp_name        = null   # use module-generated default
+    kv_name        = "ADH-KTK-KV-nonprd"
+    kv_rg_name     = "ADH_KTK_KV"
+    kv_secret_name = "ADH-KTK-Gen-SPN_nonprd-Secret"
+  }
+
+  relt-buff = {
+    adh_group                   = "RELT"
+    adh_sub_group               = "BUFF"
+    adh_group_subscription_type = "prd"
+    sp_owners                   = ["lead@contoso.com"]
+    sp_name        = "ADH_RELT_BUFF_Custom_Gen_SPN_prd"  # custom override
+    kv_name        = "ADH-RELT-BUFF-KV-prd"
+    kv_rg_name     = "ADH_RELT_BUFF_KV"
+    kv_secret_name = "ADH-RELT-BUFF-Gen-SPN_prd-Secret"
+  }
+}
