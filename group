@@ -1,0 +1,72 @@
+variable "groups" {
+  description = "Groups to create"
+  type = list(object({
+    name            = string
+    desc            = string
+    active          = bool
+    owners          = optional(list(string), [])
+    requestable     = optional(bool, false)  
+    groupmembership = string                  
+    membership_rule = optional(string, null)  # required when dynamic
+  }))
+}
+
+
+locals.tf :
+
+locals {
+  active_groups = {
+    for g in var.groups : g.name => g
+    if try(g.active, false) == true
+  }
+
+  owner_emails = toset(flatten([
+    for g in var.groups : coalesce(g.owners, [])
+  ]))
+}
+
+
+data.tf:
+
+data "azuread_client_config" "current" {}
+
+# Resolve owners by UPN (preferred). If your inputs aren't UPNs, switch to mail_nickname/object_id accordingly.
+data "azuread_user" "readusers" {
+  for_each = local.owner_emails
+  user_principal_name = each.key
+}
+
+main.tf :
+
+resource "azuread_group" "example" {
+  for_each         = local.active_groups
+  display_name     = each.value.name
+  description      = each.value.desc
+  security_enabled = true
+  mail_enabled     = false
+
+  # Owners -> object IDs (ignore any that fail to resolve)
+  owners = [
+    for email in coalesce(each.value.owners, []) :
+    data.azuread_user.readusers[email].id
+    if contains(keys(data.azuread_user.readusers), email)
+  ]
+
+  # Dynamic membership, when requested
+  dynamic "dynamic_membership" {
+    for_each = (
+      each.value.groupmembership == "Assigned"
+      ? []
+      : [1] # enable the block
+    )
+    content {
+      enabled = true
+      rule    = each.value.membership_rule
+      # If you're doing DynamicDevice, ensure your rule targets devices (e.g., user.objectId vs device.deviceId).
+    }
+  }
+
+  # Optional: visibility, prevent_duplicate_names, etc.
+  # visibility              = "Private"
+  # prevent_duplicate_names = true
+}
