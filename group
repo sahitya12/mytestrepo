@@ -1,3 +1,19 @@
+owners = [
+    for raw in coalesce(each.value.owners, []) : (
+      # if raw looks like "/users/<guid>", strip the prefix and pass the GUID directly
+      startswith(raw, "/users/")
+      ? element(split(raw, "/"), 2)
+      # otherwise treat as UPN and map via data.azuread_user.owners[raw].id
+      : data.azuread_user.owners[raw].id
+    )
+    if (
+      # allow "/users/<guid>" without lookup
+      startswith(raw, "/users/")
+      # or include only if the UPN was successfully resolved
+      || contains(keys(data.azuread_user.owners), raw)
+    )
+  ]
+
 variable "groups" {
   description = "Groups to create"
   type = list(object({
