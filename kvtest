@@ -1,0 +1,18 @@
+locals {
+  sub_type_norm   = lower(var.adh_group_subscription_type)
+  adh_group_upper = upper(var.adh_group)
+
+  # Generated KV name:
+  # - nonprd  -> ADH-<GROUP>-KV-dev
+  # - prd     -> ADH-<GROUP>-KV-prd
+  generated_kv_name = local.sub_type_norm == "prd"
+    ? format("ADH-%s-KV-prd", local.adh_group_upper)
+    : format("ADH-%s-KV-dev", local.adh_group_upper)
+
+  # Generated KV RG name: ADH_<GROUP>_KV
+  generated_kv_rg_name = format("ADH_%s_KV", local.adh_group_upper)
+
+  # Effective values (use variable if provided, else fall back to generated)
+  effective_kv_name    = coalesce(var.kv_name,    local.generated_kv_name)
+  effective_kv_rg_name = coalesce(var.kv_rg_name, local.generated_kv_rg_name)
+}
