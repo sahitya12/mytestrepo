@@ -1,3 +1,11 @@
+schedules:
+- cron: "*/15 * * * *"
+  displayName: "Every 15 minutes"
+  branches:
+    include:
+    - main
+
+
 # Ensure Az module is installed
 if (-not (Get-Module -ListAvailable -Name Az.Storage)) {
     Install-Module -Name Az.Storage -Force -Scope CurrentUser -AllowClobber
