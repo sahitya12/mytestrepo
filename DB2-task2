@@ -1,0 +1,96 @@
+# Inputs
+$adhGroup    = "$(adh_group)"
+$adhSubType  = "$(adh_subscription_type)"   # prd | nonprd
+$targetSub   = "$(TargetSubId)"
+
+if ([string]::IsNullOrWhiteSpace($adhGroup) -or [string]::IsNullOrWhiteSpace($adhSubType)) {
+  throw "adh_group or adh_subscription_type is empty."
+}
+if ([string]::IsNullOrWhiteSpace($targetSub)) {
+  throw "TargetSubId is empty (Task 1 must run first)."
+}
+
+# Environments to check
+$envs = if ($adhSubType -eq "prd") { @("prd") } else { @("dev","tst","stg") }
+Write-Host "Subscription type: $adhSubType; Environments to check: $($envs -join ', ')"
+
+# Use the SP login from Task 1 and switch to the target subscription
+az account set --subscription $targetSub
+
+# Get AAD access token for Azure Databricks control plane (first-party app id)
+$token = az account get-access-token `
+  --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d `
+  --query accessToken -o tsv
+if ([string]::IsNullOrWhiteSpace($token)) { throw "Failed to obtain AAD token for Databricks." }
+$headers = @{ Authorization = "Bearer $token" }
+
+foreach ($env in $envs) {
+  $wsName = "ADH_{0}_{1}" -f $adhGroup, $env
+  Write-Host "-----"
+  Write-Host "Processing workspace: $wsName"
+
+  # Find the workspace ARM resource
+  $ws = az resource list --resource-type Microsoft.Databricks/workspaces --query "[?name=='$wsName'] | [0]" -o json | ConvertFrom-Json
+  if (-not $ws) {
+    Write-Host "Workspace '${wsName}' not found in subscription $targetSub. Skipping."
+    continue
+  }
+
+  # Resolve workspaceUrl robustly
+  $workspaceUrl = $ws.properties.workspaceUrl
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl) -and $ws.id) {
+    $workspaceUrl = az resource show --ids $ws.id --query "properties.workspaceUrl" -o tsv
+  }
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl) -and $ws.id) {
+    $workspaceUrl = az resource show --ids $ws.id --query "properties.parameters.workspaceUrl.value" -o tsv
+  }
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl)) {
+    Write-Warning "workspaceUrl not found for ${wsName}. Skipping."
+    continue
+  }
+
+  # Build host (avoid reserved $host variable name)
+  $dbxHost = if ($workspaceUrl -match '^https?://') { $workspaceUrl } else { "https://$workspaceUrl" }
+  Write-Host "Workspace host: $dbxHost"
+
+  # List warehouses
+  $listUri = "$dbxHost/api/2.0/sql/warehouses"
+  try {
+    $resp = Invoke-RestMethod -Method GET -Uri $listUri -Headers $headers -ErrorAction Stop
+  } catch {
+    Write-Warning "Failed to list warehouses for ${wsName}: $($_.Exception.Message)"
+    continue
+  }
+
+  # Prefer serverless starter; fallback to classic starter
+  $primaryName  = "Serverless Starter Warehouse"
+  $fallbackName = "Starter Warehouse"
+
+  $starter = $resp.warehouses | Where-Object { $_.name -eq $primaryName } | Select-Object -First 1
+  if (-not $starter) {
+    Write-Host "'$primaryName' not found in ${wsName}; checking '$fallbackName'."
+    $starter = $resp.warehouses | Where-Object { $_.name -eq $fallbackName } | Select-Object -First 1
+  }
+
+  if (-not $starter) {
+    Write-Host "No Serverless/Starter Warehouse found in ${wsName}. Skipping."
+    continue
+  }
+
+  # Delete it (idempotent; ignore 404)
+  $delUri = "$dbxHost/api/2.0/sql/warehouses/$($starter.id)"
+  Write-Host "Deleting warehouse '$($starter.name)' (id: $($starter.id)) in ${wsName}"
+  try {
+    Invoke-RestMethod -Method DELETE -Uri $delUri -Headers $headers -ErrorAction Stop | Out-Null
+    Write-Host "Deleted '$($starter.name)' in ${wsName}."
+  } catch {
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 404) {
+      Write-Host "'$($starter.name)' already deleted in ${wsName} (404)."
+    } else {
+      throw
+    }
+  }
+}
+
+Write-Host "-----"
+Write-Host "Completed checks for environments: $($envs -join ', ')"
