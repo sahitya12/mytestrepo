@@ -1,0 +1,295 @@
+0) Prerequisites (one-time)
+
+Service connection: You should already have a fixed Azure RM service connection in the same tenant (used by Azure CLI tasks).
+
+Variable groups present:
+
+moderanization_terraform_subscription_details
+
+test_moderanization_terraform_subscription_details
+
+moderanization_tfstate_backend_details (must contain backend_client_id (secret), backend_client_secret (secret), tenant_id)
+
+Release variables set:
+
+adh_group (e.g., KTK)
+
+adh_subscription_type (prd or nonprd)
+
+1) Open your Release pipeline
+
+Azure DevOps → Pipelines → Releases → open your pipeline → Edit.
+
+2) Add a new stage (the Plan stage)
+
+Click + Add a stage → choose Empty job.
+
+Stage name: Plan: Identify Warehouses to Remove.
+
+(Optional) Drag this stage before your existing delete stage to enforce the order.
+
+3) Link variable groups to the Plan stage
+
+In the top bar, click Variables → Variable groups.
+
+Link all three groups:
+
+moderanization_terraform_subscription_details
+
+test_moderanization_terraform_subscription_details
+
+moderanization_tfstate_backend_details
+
+Make sure the secrets are marked secret in the group (backend_client_secret).
+
+4) Configure the Agent job
+
+Click the new stage → 1 job, 0 tasks → Agent job.
+
+Agent pool: Azure Pipelines
+
+Agent specification: windows-latest (gives you PowerShell Core and Azure CLI)
+
+5) Task 1 — PowerShell (SP login + resolve subscription id)
+
+Add task: PowerShell
+Display name: Resolve subscription ID (plan)
+Script Type: Inline
+Script (paste):
+
+# --------- AZ LOGIN via Service Principal (from variable group moderanization_tfstate_backend_details) ---------
+$clientId     = (Get-Item Env:backend_client_id     -ErrorAction SilentlyContinue).Value
+$clientSecret = (Get-Item Env:backend_client_secret -ErrorAction SilentlyContinue).Value
+$tenantId     = (Get-Item Env:tenant_id             -ErrorAction SilentlyContinue).Value
+
+if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($clientSecret) -or [string]::IsNullOrWhiteSpace($tenantId)) {
+  throw "Missing one or more login vars: backend_client_id / backend_client_secret / tenant_id. Check variable group 'moderanization_tfstate_backend_details'."
+}
+
+Write-Host "Logging into Azure with service principal (tenant: $tenantId)..."
+az logout | Out-Null
+$null = az login --service-principal -u $clientId -p $clientSecret --tenant $tenantId
+if ($LASTEXITCODE -ne 0) { throw "az login failed." }
+
+# --------- Resolve subscription ID from env-specific mapping keys ---------
+$adhGroup   = "$(adh_group)"
+$adhSubType = "$(adh_subscription_type)"   # prd | nonprd
+
+if ([string]::IsNullOrWhiteSpace($adhGroup) -or [string]::IsNullOrWhiteSpace($adhSubType)) {
+  throw "adh_group or adh_subscription_type is empty."
+}
+
+# Variable key: <adh_group>_<adh_subscription_type>_subscription_id  (no 'ADH_' prefix)
+$key = "{0}_{1}_subscription_id" -f $adhGroup, $adhSubType
+Write-Host "Looking up variable key: $key (from linked variable groups)"
+
+$subId = (Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue).Value
+if (-not $subId) {
+  throw "No subscription ID found for '$key'. Check your variable groups."
+}
+
+Write-Host "Resolved subscription: $subId"
+Write-Host "##vso[task.setvariable variable=TargetSubId]$subId"
+
+6) Task 2 — Azure CLI (PowerShell Core) — PLAN ONLY
+
+Add task: Azure CLI
+Display name: Plan: What would be removed?
+Azure subscription: pick your fixed Azure RM service connection
+Script Type: PowerShell Core
+Inline Script (paste):
+
+# Inputs
+$adhGroup    = "$(adh_group)"
+$adhSubType  = "$(adh_subscription_type)"   # prd | nonprd
+$targetSub   = "$(TargetSubId)"
+
+if ([string]::IsNullOrWhiteSpace($adhGroup) -or [string]::IsNullOrWhiteSpace($adhSubType)) {
+  throw "adh_group or adh_subscription_type is empty."
+}
+if ([string]::IsNullOrWhiteSpace($targetSub)) {
+  throw "TargetSubId is empty (Task 1 must run first)."
+}
+
+# Environments: prd -> ['prd']; nonprd -> ['dev','tst','stg']
+$envs = if ($adhSubType -eq "prd") { @("prd") } else { @("dev","tst","stg") }
+Write-Host "PLAN mode. Subscription type: $adhSubType; Environments to check: $($envs -join ', ')"
+
+# Subscription context
+az account set --subscription $targetSub
+
+# AAD token for Azure Databricks control plane
+$token = az account get-access-token `
+  --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d `
+  --query accessToken -o tsv
+if ([string]::IsNullOrWhiteSpace($token)) { throw "Failed to obtain AAD token for Databricks." }
+$headers = @{ Authorization = "Bearer $token" }
+
+# Collect a summary we can print at the end
+$plan = @()
+
+foreach ($env in $envs) {
+  $wsName = "ADH_{0}_{1}" -f $adhGroup, $env
+  Write-Host "-----"
+  Write-Host "Checking workspace: $wsName"
+
+  # Find workspace
+  $ws = az resource list --resource-type Microsoft.Databricks/workspaces --query "[?name=='$wsName'] | [0]" -o json | ConvertFrom-Json
+  if (-not $ws) {
+    Write-Host "Workspace '${wsName}' not found in subscription $targetSub. Skipping."
+    $plan += [pscustomobject]@{ workspace=$wsName; host=$null; action="skip"; reason="workspace not found"; warehouse=$null; id=$null }
+    continue
+  }
+
+  # Resolve workspaceUrl robustly
+  $workspaceUrl = $ws.properties.workspaceUrl
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl) -and $ws.id) {
+    $workspaceUrl = az resource show --ids $ws.id --query "properties.workspaceUrl" -o tsv
+  }
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl) -and $ws.id) {
+    $workspaceUrl = az resource show --ids $ws.id --query "properties.parameters.workspaceUrl.value" -o tsv
+  }
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl)) {
+    Write-Warning "workspaceUrl not found for ${wsName}. Skipping."
+    $plan += [pscustomobject]@{ workspace=$wsName; host=$null; action="skip"; reason="no workspaceUrl"; warehouse=$null; id=$null }
+    continue
+  }
+
+  $dbxHost = if ($workspaceUrl -match '^https?://') { $workspaceUrl } else { "https://$workspaceUrl" }
+  Write-Host "Workspace host: $dbxHost"
+
+  # List warehouses
+  $listUri = "$dbxHost/api/2.0/sql/warehouses"
+  try {
+    $resp = Invoke-RestMethod -Method GET -Uri $listUri -Headers $headers -ErrorAction Stop
+  } catch {
+    Write-Warning "Failed to list warehouses for ${wsName}: $($_.Exception.Message)"
+    $plan += [pscustomobject]@{ workspace=$wsName; host=$dbxHost; action="skip"; reason="list failed"; warehouse=$null; id=$null }
+    continue
+  }
+
+  # Prefer serverless starter; fallback to classic starter
+  $primaryName  = "Serverless Starter Warehouse"
+  $fallbackName = "Starter Warehouse"
+
+  $starter = $resp.warehouses | Where-Object { $_.name -eq $primaryName } | Select-Object -First 1
+  if (-not $starter) {
+    $starter = $resp.warehouses | Where-Object { $_.name -eq $fallbackName } | Select-Object -First 1
+  }
+
+  if ($starter) {
+    Write-Host "WOULD DELETE: '$($starter.name)' (id: $($starter.id)) in ${wsName}"
+    $plan += [pscustomobject]@{ workspace=$wsName; host=$dbxHost; action="would-delete"; reason="found"; warehouse=$starter.name; id=$starter.id }
+  } else {
+    Write-Host "No Serverless/Starter Warehouse found in ${wsName}."
+    $plan += [pscustomobject]@{ workspace=$wsName; host=$dbxHost; action="noop"; reason="not found"; warehouse=$null; id=$null }
+  }
+}
+
+Write-Host "-----"
+Write-Host "PLAN SUMMARY"
+$plan | Sort-Object workspace | Format-Table workspace, host, action, reason, warehouse, id -AutoSize | Out-String | Write-Host
+
+# Optional: set a flag to gate the delete stage
+$wouldDelete = [bool]($plan | Where-Object { $_.action -eq "would-delete" })
+Write-Host "WouldDelete=$wouldDelete"
+Write-Host "##vso[task.setvariable variable=PlanWouldDelete]$wouldDelete"
+
+7) (Optional) Gate the delete stage on the plan result
+
+Open your Delete stage → Pre-deployment conditions (lightning bolt).
+
+Toggle Enable.
+
+Choose Custom condition and set:
+
+eq(variables['PlanWouldDelete'], 'True')
+
+
+This makes the delete stage run only if the plan found at least one starter warehouse to delete.
+
+8) Save and test
+
+Save the release pipeline.
+
+Create a new release with adh_group and adh_subscription_type.
+
+Check the Plan stage logs:
+
+Task 1 should print the resolved subscription.
+
+Task 2 prints each workspace checked and the PLAN SUMMARY.
+
+If you added the gate, confirm the delete stage triggers only when WouldDelete=True.
+
+Troubleshooting tips
+
+Login failure: ensure backend_client_id, backend_client_secret, tenant_id exist and are correct in moderanization_tfstate_backend_details.
+
+Key not found: verify the subscription key exists in one of the two mapping groups with the exact pattern <adh_group>_<adh_subscription_type>_subscription_id.
+
+403 on API calls: add the SPN to the Databricks workspace and grant Workspace Admin (or SQL Warehouse admin).
+
+Empty workspaceUrl: make sure the service connection/SPN has Reader on the subscription/RG housing the workspace.
+
+If you want, I can also provide a combined stage that toggles plan vs. delete using a variable (e.g., do_delete=true/false) so you can switch behavior without maintaining two stages.
+
+You said:
+can we create serverless starter warehouse on databricks using CLI
+ChatGPT said:
+
+Yes ✅ — you can create a Serverless Starter Warehouse (or any SQL warehouse) on Azure Databricks using the Databricks CLI or a simple REST API call via az cli + Invoke-RestMethod.
+
+🔹 Using Databricks CLI
+
+Install the CLI:
+
+pip install databricks-cli
+
+
+Configure authentication (service principal or PAT token):
+
+databricks configure --aad-token
+
+
+or for SP:
+
+databricks configure --token
+
+
+Create a warehouse with JSON payload:
+
+databricks sql warehouses create --json '{
+  "name": "Serverless Starter Warehouse",
+  "cluster_size": "2X-Small",
+  "type": "SERVERLESS",
+  "enable_serverless_compute": true,
+  "auto_stop_mins": 15
+}'
+
+🔹 Using REST API (inside Azure CLI task / PowerShell Core)
+
+If you’re already using az account get-access-token in your pipeline, you can do:
+
+# Get AAD token
+$token = az account get-access-token `
+  --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d `
+  --query accessToken -o tsv
+$headers = @{ Authorization = "Bearer $token" }
+
+# Workspace URL (example)
+$dbxHost = "https://adb-1234567890123456.2.azuredatabricks.net"
+
+# Create a serverless starter warehouse
+$body = @{
+  name = "Serverless Starter Warehouse"
+  cluster_size = "2X-Small"
+  type = "SERVERLESS"
+  enable_serverless_compute = $true
+  auto_stop_mins = 15
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method POST `
+  -Uri "$dbxHost/api/2.0/sql/warehouses" `
+  -Headers $headers `
+  -Body $body
