@@ -1,0 +1,143 @@
+Stage: Create – Serverless Starter Warehouse (if missing)
+Prereqs (same as your other stages)
+
+Release variables: adh_group (e.g., KTK), adh_subscription_type (prd or nonprd)
+
+Variable groups linked to this stage:
+
+moderanization_terraform_subscription_details
+
+test_moderanization_terraform_subscription_details
+
+moderanization_tfstate_backend_details (provides backend_client_id (secret), backend_client_secret (secret), tenant_id)
+
+Permissions: SPN is Workspace Admin in Databricks and Reader on the subscription/RG.
+
+Task 1 — PowerShell (SP login + resolve subscription ID)
+
+Display name: Resolve subscription ID (create)
+Script Type: Inline
+
+# --------- AZ LOGIN via Service Principal (variable group: moderanization_tfstate_backend_details) ---------
+$clientId     = (Get-Item Env:backend_client_id     -ErrorAction SilentlyContinue).Value
+$clientSecret = (Get-Item Env:backend_client_secret -ErrorAction SilentlyContinue).Value
+$tenantId     = (Get-Item Env:tenant_id             -ErrorAction SilentlyContinue).Value
+
+if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($clientSecret) -or [string]::IsNullOrWhiteSpace($tenantId)) {
+  throw "Missing backend_client_id / backend_client_secret / tenant_id (variable group 'moderanization_tfstate_backend_details')."
+}
+
+Write-Host "Logging into Azure with service principal (tenant: $tenantId)..."
+az logout | Out-Null
+$null = az login --service-principal -u $clientId -p $clientSecret --tenant $tenantId
+if ($LASTEXITCODE -ne 0) { throw "az login failed." }
+
+# --------- Resolve subscription ID from mapping keys ---------
+$adhGroup   = "$(adh_group)"
+$adhSubType = "$(adh_subscription_type)"   # prd | nonprd
+if ([string]::IsNullOrWhiteSpace($adhGroup) -or [string]::IsNullOrWhiteSpace($adhSubType)) {
+  throw "adh_group or adh_subscription_type is empty."
+}
+
+# Key pattern (NO 'ADH_' prefix): <adh_group>_<adh_subscription_type>_subscription_id
+$key = "{0}_{1}_subscription_id" -f $adhGroup, $adhSubType
+Write-Host "Looking up variable key: $key (from linked variable groups)"
+
+$subId = (Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue).Value
+if (-not $subId) { throw "No subscription ID found for '$key' in linked variable groups." }
+
+Write-Host "Resolved subscription: $subId"
+Write-Host "##vso[task.setvariable variable=TargetSubId]$subId"
+
+Task 2 — Azure CLI (PowerShell Core) — Create if missing
+
+Display name: Create Serverless Starter Warehouse (if missing)
+Azure subscription: your fixed service connection
+Script Type: PowerShell Core
+
+# Inputs
+$adhGroup    = "$(adh_group)"
+$adhSubType  = "$(adh_subscription_type)"   # prd | nonprd
+$targetSub   = "$(TargetSubId)"
+if ([string]::IsNullOrWhiteSpace($adhGroup) -or [string]::IsNullOrWhiteSpace($adhSubType)) { throw "adh_group or adh_subscription_type is empty." }
+if ([string]::IsNullOrWhiteSpace($targetSub)) { throw "TargetSubId is empty (Task 1 must run first)." }
+
+# Env set: prd -> ['prd']; nonprd -> ['dev','tst','stg']
+$envs = if ($adhSubType -eq "prd") { @("prd") } else { @("dev","tst","stg") }
+Write-Host "Create mode. Subscription type: $adhSubType; Environments to check: $($envs -join ', ')"
+
+# Subscription context
+az account set --subscription $targetSub
+
+# AAD token for Azure Databricks control plane (first-party app id)
+$token = az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv
+if ([string]::IsNullOrWhiteSpace($token)) { throw "Failed to obtain AAD token for Databricks." }
+$headers = @{ Authorization = "Bearer $token" ; "Content-Type" = "application/json" }
+
+# Warehouse name and defaults (adjust if needed)
+$targetWhName = "Serverless Starter Warehouse"
+$clusterSize  = "2X-Small"   # typical starter size
+$autoStopMins = 15
+
+foreach ($env in $envs) {
+  $wsName = "ADH_{0}_{1}" -f $adhGroup, $env
+  Write-Host "-----"
+  Write-Host "Processing workspace: $wsName"
+
+  # Find workspace
+  $ws = az resource list --resource-type Microsoft.Databricks/workspaces --query "[?name=='$wsName'] | [0]" -o json | ConvertFrom-Json
+  if (-not $ws) { Write-Host "Workspace '${wsName}' not found in subscription $targetSub. Skipping."; continue }
+
+  # Resolve workspaceUrl robustly
+  $workspaceUrl = $ws.properties.workspaceUrl
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl) -and $ws.id) {
+    $workspaceUrl = az resource show --ids $ws.id --query "properties.workspaceUrl" -o tsv
+  }
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl) -and $ws.id) {
+    $workspaceUrl = az resource show --ids $ws.id --query "properties.parameters.workspaceUrl.value" -o tsv
+  }
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl)) { Write-Warning "workspaceUrl not found for ${wsName}. Skipping."; continue }
+
+  $dbxHost = if ($workspaceUrl -match '^https?://') { $workspaceUrl } else { "https://$workspaceUrl" }
+  Write-Host "Workspace host: $dbxHost"
+
+  # List warehouses (to check if already exists)
+  $listUri = "$dbxHost/api/2.0/sql/warehouses"
+  try {
+    $resp = Invoke-RestMethod -Method GET -Uri $listUri -Headers @{ Authorization = "Bearer $token" } -ErrorAction Stop
+  } catch {
+    Write-Warning "Failed to list warehouses for ${wsName}: $($_.Exception.Message)"
+    continue
+  }
+
+  $existing = $resp.warehouses | Where-Object { $_.name -eq $targetWhName } | Select-Object -First 1
+  if ($existing) {
+    Write-Host "Warehouse '$targetWhName' already exists in ${wsName} (id: $($existing.id)). Skipping creation."
+    continue
+  }
+
+  # Create serverless starter warehouse
+  $createBody = @{
+    name                       = $targetWhName
+    type                       = "SERVERLESS"
+    cluster_size               = $clusterSize
+    enable_serverless_compute  = $true
+    auto_stop_mins             = $autoStopMins
+    # Optional toggles you may want:
+    # enable_photon             = $true
+    # spot_instance_policy      = "RELIABILITY_OPTIMIZED"  # depends on policy
+  } | ConvertTo-Json -Depth 10
+
+  $createUri = "$dbxHost/api/2.0/sql/warehouses"
+  Write-Host "Creating warehouse '$targetWhName' in ${wsName}..."
+  try {
+    $created = Invoke-RestMethod -Method POST -Uri $createUri -Headers $headers -Body $createBody -ErrorAction Stop
+    Write-Host "Created '$($created.name)' (id: $($created.id)) in ${wsName}."
+  } catch {
+    Write-Warning "Failed to create warehouse in ${wsName}: $($_.Exception.Message)"
+    continue
+  }
+}
+
+Write-Host "-----"
+Write-Host "Create stage complete for environments: $($envs -join ', ')"
