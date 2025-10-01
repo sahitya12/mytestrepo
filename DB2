@@ -1,35 +1,89 @@
-# --------- AZ LOGIN via Service Principal (from variable group moderanization_tfstate_backend_details) ---------
+# ===== Inputs from Variable Group (SPN creds) =====
 $clientId     = (Get-Item Env:backend_client_id     -ErrorAction SilentlyContinue).Value
 $clientSecret = (Get-Item Env:backend_client_secret -ErrorAction SilentlyContinue).Value
 $tenantId     = (Get-Item Env:tenant_id             -ErrorAction SilentlyContinue).Value
-
 if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($clientSecret) -or [string]::IsNullOrWhiteSpace($tenantId)) {
-  throw "Missing one or more login vars: backend_client_id / backend_client_secret / tenant_id. Check variable group 'moderanization_tfstate_backend_details'."
+  throw "Missing backend_client_id / backend_client_secret / tenant_id (ensure the correct variable group is linked and LAST)."
 }
 
+# ===== Inputs from Release variables =====
+$adhGroup   = "$(adh_group)"
+$adhSubType = "$(adh_subscription_type)"   # nonprd | prd
+if ([string]::IsNullOrWhiteSpace($adhGroup) -or [string]::IsNullOrWhiteSpace($adhSubType)) { throw "adh_group or adh_subscription_type is empty." }
+
+# ===== Login with SPN =====
 Write-Host "Logging into Azure with service principal (tenant: $tenantId)..."
 az logout | Out-Null
-# Do NOT echo the secret
-$loginResult = az login --service-principal -u $clientId -p $clientSecret --tenant $tenantId 2>$null
+$null = az login --service-principal -u $clientId -p $clientSecret --tenant $tenantId
 if ($LASTEXITCODE -ne 0) { throw "az login failed." }
 
-# --------- Resolve subscription ID from env-specific mapping keys ---------
-$adhGroup   = "$(adh_group)"
-$adhSubType = "$(adh_subscription_type)"   # prd | nonprd
+# ===== Find subscription by NAME (prefix rule) =====
+$subs = az account list --all -o json | ConvertFrom-Json
+if (-not $subs) { throw "No subscriptions visible to this SPN." }
 
-if ([string]::IsNullOrWhiteSpace($adhGroup) -or [string]::IsNullOrWhiteSpace($adhSubType)) {
-  throw "adh_group or adh_subscription_type is empty."
+$pattern = if ($adhSubType -ieq "prd") {
+  ("(?i)^prd_azure_.+_ADH{0}$" -f [regex]::Escape($adhGroup))
+} else {
+  ("(?i)^dev_azure_.+_ADH{0}$" -f [regex]::Escape($adhGroup))
 }
 
-# New naming: <adh_group>_<adh_subscription_type>_subscription_id  (no 'ADH_' prefix)
-$key = "{0}_{1}_subscription_id" -f $adhGroup, $adhSubType
-Write-Host "Looking up variable key: $key (from linked variable groups)"
+$matches = $subs | Where-Object { $_.name -and ($_.name -match $pattern) }
+if (-not $matches -or $matches.Count -eq 0) {
+  $names = ($subs | Select-Object -ExpandProperty name) -join ", "
+  throw "No subscription matched pattern '$pattern'. Visible: $names"
+}
+if ($matches.Count -gt 1) {
+  Write-Warning ("Multiple subscriptions match '{0}': {1}" -f $pattern, (($matches | Select-Object -ExpandProperty name) -join " | "))
+}
+$targetSub  = $matches[0].id
+$targetName = $matches[0].name
+Write-Host "Resolved subscription: $targetName ($targetSub)"
+az account set --subscription $targetSub
 
-# Variable groups expose vars as environment variables
-$subId = (Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue).Value
-if (-not $subId) {
-  throw "No subscription ID found for '$key'. Check your variable groups."
+# ===== Environments to DELETE =====
+$envs = if ($adhSubType -ieq "prd") { @("prd") } else { @("dev","tst","stg") }
+Write-Host "DELETE mode. Environments to check: $($envs -join ', ')"
+
+# ===== Databricks AAD token =====
+$token = az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv
+if ([string]::IsNullOrWhiteSpace($token)) { throw "Failed to obtain AAD token for Databricks." }
+$headers = @{ Authorization = "Bearer $token" }
+
+foreach ($env in $envs) {
+  $wsName = "ADH_{0}_{1}" -f $adhGroup, $env
+  Write-Host "-----"
+  Write-Host "Processing workspace: $wsName"
+
+  $ws = az resource list --resource-type Microsoft.Databricks/workspaces --query "[?name=='$wsName'] | [0]" -o json | ConvertFrom-Json
+  if (-not $ws) { Write-Host "Workspace '${wsName}' not found in subscription $targetSub. Skipping."; continue }
+
+  $workspaceUrl = $ws.properties.workspaceUrl
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl) -and $ws.id) { $workspaceUrl = az resource show --ids $ws.id --query "properties.workspaceUrl" -o tsv }
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl) -and $ws.id) { $workspaceUrl = az resource show --ids $ws.id --query "properties.parameters.workspaceUrl.value" -o tsv }
+  if ([string]::IsNullOrWhiteSpace($workspaceUrl)) { Write-Warning "workspaceUrl not found for ${wsName}. Skipping."; continue }
+
+  $dbxHost = if ($workspaceUrl -match '^https?://') { $workspaceUrl } else { "https://$workspaceUrl" }
+  Write-Host "Workspace host: $dbxHost"
+
+  $listUri = "$dbxHost/api/2.0/sql/warehouses"
+  try { $resp = Invoke-RestMethod -Method GET -Uri $listUri -Headers $headers -ErrorAction Stop }
+  catch { Write-Warning "Failed to list warehouses for ${wsName}: $($_.Exception.Message)"; continue }
+
+  $primaryName  = "Serverless Starter Warehouse"
+  $fallbackName = "Starter Warehouse"
+  $starter = $resp.warehouses | Where-Object { $_.name -eq $primaryName } | Select-Object -First 1
+  if (-not $starter) { Write-Host "'$primaryName' not found in ${wsName}; checking '$fallbackName'."; $starter = $resp.warehouses | Where-Object { $_.name -eq $fallbackName } | Select-Object -First 1 }
+
+  if (-not $starter) { Write-Host "No Serverless/Starter Warehouse found in ${wsName}. Skipping."; continue }
+
+  $delUri = "$dbxHost/api/2.0/sql/warehouses/$($starter.id)"
+  Write-Host "Deleting warehouse '$($starter.name)' (id: $($starter.id)) in ${wsName}"
+  try { Invoke-RestMethod -Method DELETE -Uri $delUri -Headers $headers -ErrorAction Stop | Out-Null; Write-Host "Deleted '$($starter.name)' in ${wsName}." }
+  catch {
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 404) { Write-Host "'$($starter.name)' already deleted in ${wsName} (404)." }
+    else { throw }
+  }
 }
 
-Write-Host "Resolved subscription: $subId"
-Write-Host "##vso[task.setvariable variable=TargetSubId]$subId"
+Write-Host "-----"
+Write-Host "Deletion checks completed for: $($envs -join ', ') in subscription $targetName"
