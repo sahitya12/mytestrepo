@@ -1,30 +1,53 @@
 parameters:
+  run_mode: 'ByCustodian'        # ByCustodian | AllADH
   adh_group: ''
+  adh_subscription_type: ''      # prd | nonprd
   prodCsvPath: ''
   nonProdCsvPath: ''
   variableGroup: 'modernization_tfstate_backend_details'
+  outDir: '$(Build.ArtifactStagingDirectory)/rg-perms'
+  branchName: ''
+  poolType: 'hosted'             # hosted | self
+  poolName: ''                   # explicit name (e.g., MDM_nonprd_agent1)
+  poolSuffix: '_agent1'          # used if poolName=''
+  useDemands: true
 
-stages:
-- stage: RG_Permissions
-  displayName: RG Permissions (${{ parameters.adh_group }})
-  variables:
-    outDir: '$(Build.ArtifactStagingDirectory)/rg-perms'
-  jobs:
+- ${{ if eq(parameters.run_mode, 'ByCustodian') }}:
   - template: ../templates/job.powershell-with-az.yml
     parameters:
       variableGroup: ${{ parameters.variableGroup }}
-      displayName: 'RG Permissions Scan'
+      displayName: 'RG Permissions (ByCustodian)'
       scriptPath: 'sanitychecks/scripts/Scan-RG-Permissions-ByCustodian.ps1'
       workingDir: '$(Build.SourcesDirectory)/sanitychecks/scripts'
-      # The script itself performs Connect-AzAccount, scans only subs with ADH+custodian
       arguments: >
-        -TenantId "$(tenant_id)"
-        -ClientId "$(backend_client_id)"
-        -ClientSecret "$(backend_client_secret)"
-        -ProdCsvPath "${{ parameters.prodCsvPath }}"
-        -NonProdCsvPath "${{ parameters.nonProdCsvPath }}"
-        -adh_group "${{ parameters.adh_group }}"
-        -OutputDir "$(outDir)"
-        -TeamsWebhookUrl "$(teamsWebhook)"
-      artifactName: "rg-perms-${{ parameters.adh_group }}"
-      publishPath: "$(outDir)"
+        -TenantId "$(tenant_id)" -ClientId "$(backend_client_id)" -ClientSecret "$(backend_client_secret)"
+        -ProdCsvPath "${{ parameters.prodCsvPath }}" -NonProdCsvPath "${{ parameters.nonProdCsvPath }}"
+        -adh_group "${{ parameters.adh_group }}" -OutputDir "${{ parameters.outDir }}" -BranchName "${{ parameters.branchName }}"
+      artifactName: 'rg-perms'
+      publishPath: "${{ parameters.outDir }}"
+      poolType: ${{ parameters.poolType }}
+      poolName: ${{ parameters.poolName }}
+      poolSuffix: ${{ parameters.poolSuffix }}
+      adh_group: ${{ parameters.adh_group }}
+      adh_subscription_type: ${{ parameters.adh_subscription_type }}
+      useDemands: ${{ parameters.useDemands }}
+
+- ${{ if ne(parameters.run_mode, 'ByCustodian') }}:
+  - template: ../templates/job.powershell-with-az.yml
+    parameters:
+      variableGroup: ${{ parameters.variableGroup }}
+      displayName: 'RG Permissions (ALLADH)'
+      scriptPath: 'sanitychecks/scripts/Scan-RG-Permissions-AllADH.ps1'
+      workingDir: '$(Build.SourcesDirectory)/sanitychecks/scripts'
+      arguments: >
+        -TenantId "$(tenant_id)" -ClientId "$(backend_client_id)" -ClientSecret "$(backend_client_secret)"
+        -ProdCsvPath "${{ parameters.prodCsvPath }}" -NonProdCsvPath "${{ parameters.nonProdCsvPath }}"
+        -OutputDir "${{ parameters.outDir }}" -BranchName "${{ parameters.branchName }}"
+      artifactName: 'rg-perms-ALLADH'
+      publishPath: "${{ parameters.outDir }}"
+      poolType: ${{ parameters.poolType }}
+      poolName: ${{ parameters.poolName }}
+      poolSuffix: ${{ parameters.poolSuffix }}
+      adh_group: ''
+      adh_subscription_type: ${{ parameters.adh_subscription_type }}
+      useDemands: false
