@@ -1,8 +1,6 @@
-# sanitychecks/.azure-pipelines/pipeline.yml
 trigger: none
 pr: none
 
-# ---------- MONTHLY SCHEDULES (run ONLY on branch develop_new) ----------
 schedules:
 - cron: "5 2 1 * *"
   displayName: "Monthly ALLADH – NonProd"
@@ -10,7 +8,6 @@ schedules:
     include:
       - develop_new
   always: true
-
 - cron: "35 2 1 * *"
   displayName: "Monthly ALLADH – Prod"
   branches:
@@ -18,14 +15,11 @@ schedules:
       - develop_new
   always: true
 
-# ------------------- MANUAL-RUN PARAMETERS -------------------
 parameters:
 - name: run_mode
   type: string
   default: ByCustodian
-  values:
-    - ByCustodian
-    - AllADH
+  values: [ ByCustodian, AllADH ]
 
 - name: adh_group
   type: string
@@ -33,43 +27,33 @@ parameters:
 
 - name: adh_groups_list
   type: object
-  default: []   # e.g. ["CSM","NHH"]
+  default: []
 
 - name: adh_subscription_type
   type: string
   default: prd
-  values:
-    - prd
-    - nonprd
+  values: [ prd, nonprd ]
 
 - name: poolType
   type: string
   default: self
-  values:
-    - hosted
-    - self
+  values: [ hosted, self ]
 
 - name: poolSuffix
   type: string
   default: "_agent1"
-  values:
-    - "_agent1"
-    - "_agent2"
+  values: [ "_agent1", "_agent2" ]
 
-# Inputs
 - name: prodCsvPath
   type: string
   default: "$(Build.SourcesDirectory)/sanitychecks/inputs/prod_permissions.csv"
-
 - name: nonProdCsvPath
   type: string
   default: "$(Build.SourcesDirectory)/sanitychecks/inputs/nonprod_permissions.csv"
-
 - name: kvSecretsCsvPath
   type: string
   default: "$(Build.SourcesDirectory)/sanitychecks/inputs/kvsecretsscan.csv"
 
-# Helper var: first custodian from list (if provided)
 variables:
 - name: firstCustodian
   value: ""
@@ -77,15 +61,14 @@ variables:
   - name: firstCustodian
     value: ${{ parameters.adh_groups_list[0] }}
 
-# ========================== STAGES ==========================
 stages:
 
-# ======= SCHEDULED MONTHLY: ALLADH NONPROD =======
+# ---------- Scheduled ALLADH NonProd ----------
 - stage: ALLADH_NonProd
   displayName: "ALLADH – NonProd (monthly)"
   condition: and(eq(variables['Build.Reason'],'Schedule'), eq(variables['Build.SourceBranchName'],'develop_new'))
   jobs:
-  - template: stages/rg-permissions.stage.yml
+  - template: jobs/rg-permissions.job.yml
     parameters:
       run_mode: AllADH
       adh_subscription_type: nonprd
@@ -98,7 +81,7 @@ stages:
       poolName: "MDM_nonprd_agent1"
       poolSuffix: "_agent1"
       useDemands: false
-  - template: stages/rg-tags.stage.yml
+  - template: jobs/rg-tags.job.yml
     parameters:
       run_mode: AllADH
       adh_subscription_type: nonprd
@@ -109,7 +92,7 @@ stages:
       poolName: "MDM_nonprd_agent1"
       poolSuffix: "_agent1"
       useDemands: false
-  - template: stages/kv-secrets.stage.yml
+  - template: jobs/kv-secrets.job.yml
     parameters:
       run_mode: AllADH
       adh_subscription_type: nonprd
@@ -121,7 +104,7 @@ stages:
       poolName: "MDM_nonprd_agent1"
       poolSuffix: "_agent1"
       useDemands: false
-  - template: stages/kv-permissions.stage.yml
+  - template: jobs/kv-permissions.job.yml
     parameters:
       run_mode: AllADH
       adh_subscription_type: nonprd
@@ -132,7 +115,7 @@ stages:
       poolName: "MDM_nonprd_agent1"
       poolSuffix: "_agent1"
       useDemands: false
-  - template: stages/kv-firewall.stage.yml
+  - template: jobs/kv-firewall.job.yml
     parameters:
       run_mode: AllADH
       adh_subscription_type: nonprd
@@ -144,12 +127,12 @@ stages:
       poolSuffix: "_agent1"
       useDemands: false
 
-# ======= SCHEDULED MONTHLY: ALLADH PROD =======
+# ---------- Scheduled ALLADH Prod ----------
 - stage: ALLADH_Prod
   displayName: "ALLADH – Prod (monthly)"
   condition: and(eq(variables['Build.Reason'],'Schedule'), eq(variables['Build.SourceBranchName'],'develop_new'))
   jobs:
-  - template: stages/rg-permissions.stage.yml
+  - template: jobs/rg-permissions.job.yml
     parameters:
       run_mode: AllADH
       adh_subscription_type: prd
@@ -162,7 +145,7 @@ stages:
       poolName: "MDM_prd_agent1"
       poolSuffix: "_agent1"
       useDemands: false
-  - template: stages/rg-tags.stage.yml
+  - template: jobs/rg-tags.job.yml
     parameters:
       run_mode: AllADH
       adh_subscription_type: prd
@@ -173,7 +156,7 @@ stages:
       poolName: "MDM_prd_agent1"
       poolSuffix: "_agent1"
       useDemands: false
-  - template: stages/kv-secrets.stage.yml
+  - template: jobs/kv-secrets.job.yml
     parameters:
       run_mode: AllADH
       adh_subscription_type: prd
@@ -185,7 +168,7 @@ stages:
       poolName: "MDM_prd_agent1"
       poolSuffix: "_agent1"
       useDemands: false
-  - template: stages/kv-permissions.stage.yml
+  - template: jobs/kv-permissions.job.yml
     parameters:
       run_mode: AllADH
       adh_subscription_type: prd
@@ -196,7 +179,7 @@ stages:
       poolName: "MDM_prd_agent1"
       poolSuffix: "_agent1"
       useDemands: false
-  - template: stages/kv-firewall.stage.yml
+  - template: jobs/kv-firewall.job.yml
     parameters:
       run_mode: AllADH
       adh_subscription_type: prd
@@ -208,12 +191,12 @@ stages:
       poolSuffix: "_agent1"
       useDemands: false
 
-# ======= MANUAL: SINGLE ByCustodian =======
+# ---------- Manual: Single ByCustodian ----------
 - ${{ if and(eq(parameters.run_mode, 'ByCustodian'), eq(length(parameters.adh_groups_list), 0)) }}:
   - stage: ByCustodian_Single
     displayName: "ByCustodian – ${{ parameters.adh_group }} (${{ parameters.adh_subscription_type }})"
     jobs:
-    - template: stages/rg-permissions.stage.yml
+    - template: jobs/rg-permissions.job.yml
       parameters:
         run_mode: ByCustodian
         adh_group: ${{ parameters.adh_group }}
@@ -224,10 +207,10 @@ stages:
         outDir: "$(Build.ArtifactStagingDirectory)/rg-perms"
         branchName: "$(Build.SourceBranchName)"
         poolType: self
-        poolName: ""                      # computed in job template
+        poolName: ""                         # computed: <adh_group>_<type><suffix>
         poolSuffix: ${{ parameters.poolSuffix }}
         useDemands: true
-    - template: stages/rg-tags.stage.yml
+    - template: jobs/rg-tags.job.yml
       parameters:
         run_mode: ByCustodian
         adh_group: ${{ parameters.adh_group }}
@@ -239,7 +222,7 @@ stages:
         poolName: ""
         poolSuffix: ${{ parameters.poolSuffix }}
         useDemands: true
-    - template: stages/kv-secrets.stage.yml
+    - template: jobs/kv-secrets.job.yml
       parameters:
         run_mode: ByCustodian
         adh_group: ${{ parameters.adh_group }}
@@ -252,7 +235,7 @@ stages:
         poolName: ""
         poolSuffix: ${{ parameters.poolSuffix }}
         useDemands: true
-    - template: stages/kv-permissions.stage.yml
+    - template: jobs/kv-permissions.job.yml
       parameters:
         run_mode: ByCustodian
         adh_group: ${{ parameters.adh_group }}
@@ -264,7 +247,7 @@ stages:
         poolName: ""
         poolSuffix: ${{ parameters.poolSuffix }}
         useDemands: true
-    - template: stages/kv-firewall.stage.yml
+    - template: jobs/kv-firewall.job.yml
       parameters:
         run_mode: ByCustodian
         adh_group: ${{ parameters.adh_group }}
@@ -277,7 +260,7 @@ stages:
         poolSuffix: ${{ parameters.poolSuffix }}
         useDemands: true
 
-# ======= MANUAL: MULTI ByCustodian (shared agent from FIRST custodian) =======
+# ---------- Manual: Multi ByCustodian (shared first custodian agent) ----------
 - ${{ if and(eq(parameters.run_mode, 'ByCustodian'), gt(length(parameters.adh_groups_list), 0)) }}:
   - stage: ByCustodian_Multi
     displayName: "ByCustodian – Multi"
@@ -298,6 +281,6 @@ stages:
           poolType: self
           poolName: ${{ format('{0}_{1}{2}', variables.firstCustodian, parameters.adh_subscription_type, parameters.poolSuffix) }}
           poolSuffix: ${{ parameters.poolSuffix }}
-          adh_group: ""
+          adh_group: ""     # disable demands on shared pool
           adh_subscription_type: ${{ parameters.adh_subscription_type }}
           useDemands: false
