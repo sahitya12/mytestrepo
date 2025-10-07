@@ -1,0 +1,23 @@
+sanitychecks/
+├─ scripts/
+│  ├─ Scan-RG-Permissions-ByCustodian.ps1
+│  ├─ Scan-RG-Permissions-AllADH.ps1
+│  ├─ Scan-RG-Tags.ps1
+│  ├─ Scan-KV-Secrets-ByCustodian.ps1
+│  ├─ Scan-KV-Secrets-AllADH.ps1
+│  ├─ Scan-KV-Permissions.ps1
+│  └─ Scan-KV-Networks.ps1
+├─ inputs/
+│  ├─ prod_permissions.csv
+│  ├─ nonprod_permissions.csv
+│  └─ kvsecretsscan.csv
+└─ .azure-pipelines/
+   ├─ pipeline.yml
+   ├─ jobs/                          ← (renamed from “stages”)
+   │  ├─ rg-permissions.job.yml
+   │  ├─ rg-tags.job.yml
+   │  ├─ kv-secrets.job.yml
+   │  ├─ kv-permissions.job.yml
+   │  └─ kv-firewall.job.yml
+   └─ templates/
+      └─ job.powershell-with-az.yml
