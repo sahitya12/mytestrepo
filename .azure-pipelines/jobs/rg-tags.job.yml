@@ -1,0 +1,50 @@
+parameters:
+  run_mode: 'ByCustodian'
+  adh_group: ''
+  adh_subscription_type: ''
+  variableGroup: 'modernization_tfstate_backend_details'
+  outDir: '$(Build.ArtifactStagingDirectory)/rg-tags'
+  branchName: ''
+
+  poolType: 'self'
+  poolName: ''
+  poolSuffix: '_agent1'
+  useDemands: true
+
+- ${{ if eq(parameters.run_mode, 'ByCustodian') }}:
+  - template: ../templates/job.powershell-with-az.yml
+    parameters:
+      variableGroup: ${{ parameters.variableGroup }}
+      displayName: 'RG Tags – ByCustodian'
+      scriptPath: 'sanitychecks/scripts/Scan-RG-Tags.ps1'
+      workingDir: '$(Build.SourcesDirectory)/sanitychecks/scripts'
+      arguments: >
+        -TenantId "$(tenant_id)" -ClientId "$(backend_client_id)" -ClientSecret "$(backend_client_secret)"
+        -adh_group "${{ parameters.adh_group }}" -OutputDir "${{ parameters.outDir }}" -BranchName "${{ parameters.branchName }}"
+      artifactName: 'rg-tags'
+      publishPath: "${{ parameters.outDir }}"
+      poolType: ${{ parameters.poolType }}
+      poolName: ${{ parameters.poolName }}
+      poolSuffix: ${{ parameters.poolSuffix }}
+      adh_group: ${{ parameters.adh_group }}
+      adh_subscription_type: ${{ parameters.adh_subscription_type }}
+      useDemands: ${{ parameters.useDemands }}
+
+- ${{ if ne(parameters.run_mode, 'ByCustodian') }}:
+  - template: ../templates/job.powershell-with-az.yml
+    parameters:
+      variableGroup: ${{ parameters.variableGroup }}
+      displayName: 'RG Tags – ALLADH'
+      scriptPath: 'sanitychecks/scripts/Scan-RG-Tags.ps1'
+      workingDir: '$(Build.SourcesDirectory)/sanitychecks/scripts'
+      arguments: >
+        -TenantId "$(tenant_id)" -ClientId "$(backend_client_id)" -ClientSecret "$(backend_client_secret)"
+        -ScanAll -OutputDir "${{ parameters.outDir }}" -BranchName "${{ parameters.branchName }}"
+      artifactName: 'rg-tags-ALLADH'
+      publishPath: "${{ parameters.outDir }}"
+      poolType: ${{ parameters.poolType }}
+      poolName: ${{ parameters.poolName }}
+      poolSuffix: ${{ parameters.poolSuffix }}
+      adh_group: ''
+      adh_subscription_type: ${{ parameters.adh_subscription_type }}
+      useDemands: false
