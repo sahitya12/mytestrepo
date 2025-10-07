@@ -1,0 +1,66 @@
+parameters:
+  run_mode: 'ByCustodian'          # ByCustodian | AllADH
+  adh_group: ''
+  adh_subscription_type: ''        # prd | nonprd
+  variableGroup: 'modernization_tfstate_backend_details'
+  outDir: '$(Build.ArtifactStagingDirectory)/adls'
+  branchName: ''
+  poolType: 'hosted'
+  poolSuffix: '_agent1'
+  poolName: ''
+  useDemands: true
+  # custom
+  scriptPath: 'sanitychecks/scripts/Scan-ADLS.ps1'
+  workingDir: '$(Build.SourcesDirectory)/sanitychecks/scripts'
+  # extra args injected at call site via template parameters
+
+- stage: ADLS_Scan
+  displayName: >-
+    ADLS (${
+      format('{0}{1}',
+        parameters.run_mode,
+        if(eq(parameters.run_mode, 'ByCustodian'), format(':0', parameters.adh_group), '')
+      )
+    })
+
+  variables:
+    outDir: ${{ parameters.outDir }}
+
+  jobs:
+  - ${{ if eq(parameters.run_mode, 'ByCustodian') }}:
+    - template: ../templates/job.powershell-with-az.yml
+      parameters:
+        variableGroup: ${{ parameters.variableGroup }}
+        displayName: 'ADLS Scan (ByCustodian)'
+        scriptPath: ${{ parameters.scriptPath }}
+        workingDir: ${{ parameters.workingDir }}
+        arguments: >
+          -TenantId "$(tenant_id)" -ClientId "$(backend_client_id)" -ClientSecret "$(backend_client_secret)"
+          -adh_group "${{ parameters.adh_group }}" -OutputDir "$(outDir)" -BranchName "${{ parameters.branchName }}" -AdlsCsvPath "${{ parameters.adlsCsvPath }}"
+        artifactName: "adls"
+        publishPath: "$(outDir)"
+        poolType: ${{ parameters.poolType }}
+        poolName: ${{ parameters.poolName }}
+        poolSuffix: ${{ parameters.poolSuffix }}
+        adh_group: ${{ parameters.adh_group }}
+        adh_subscription_type: ${{ parameters.adh_subscription_type }}
+        useDemands: ${{ parameters.useDemands }}
+
+  - ${{ if ne(parameters.run_mode, 'ByCustodian') }}:
+    - template: ../templates/job.powershell-with-az.yml
+      parameters:
+        variableGroup: ${{ parameters.variableGroup }}
+        displayName: 'ADLS Scan (AllADH)'
+        scriptPath: ${{ parameters.scriptPath }}
+        workingDir: ${{ parameters.workingDir }}
+        arguments: >
+          -TenantId "$(tenant_id)" -ClientId "$(backend_client_id)" -ClientSecret "$(backend_client_secret)"
+          -ScanAll -OutputDir "$(outDir)" -BranchName "${{ parameters.branchName }}" -AdlsCsvPath "${{ parameters.adlsCsvPath }}"
+        artifactName: "adls-ALLADH"
+        publishPath: "$(outDir)"
+        poolType: ${{ parameters.poolType }}
+        poolName: ${{ parameters.poolName }}
+        poolSuffix: ${{ parameters.poolSuffix }}
+        adh_group: ''
+        adh_subscription_type: ${{ parameters.adh_subscription_type }}
+        useDemands: false
