@@ -1,4 +1,4 @@
-# Reusable job runner for PowerShell scans
+# Reusable PowerShell job with pool rules and optional capability demand
 parameters:
   variableGroup: ''
   displayName: ''
@@ -7,32 +7,32 @@ parameters:
   arguments: ''
   artifactName: ''
   publishPath: ''
-  ensureAz: false
 
-  # Agent control
+  # Agent selection
   poolType: 'hosted'          # hosted | self
-  poolName: ''                # explicit name (preferred when self)
-  poolSuffix: '_agent1'       # used when self + poolName=''
-  adh_group: ''               # used to compute default poolName
+  poolName: ''                # explicit override
+  poolSuffix: '_agent1'       # used when auto-computing self-hosted name
+  adh_group: ''               # used for auto name + capability
   adh_subscription_type: ''   # prd | nonprd
-  useDemands: true            # set false for shared-multi-custodian pool
+  useDemands: true            # set false in multi-custodian/ALLADH
 
 jobs:
 - job: run_powershell
   displayName: ${{ parameters.displayName }}
 
-  # Agent selection
   ${{ if eq(parameters.poolType, 'hosted') }}:
     pool:
       vmImage: 'windows-latest'
 
   ${{ if ne(parameters.poolType, 'hosted') }}:
     pool:
+      # If caller passed a pool name, use it
       ${{ if ne(parameters.poolName, '') }}:
         name: ${{ parameters.poolName }}
+      # Else compute default <adh_group>_<adh_subscription_type><poolSuffix>
       ${{ if eq(parameters.poolName, '') }}:
         name: ${{ format('{0}_{1}{2}', parameters.adh_group, parameters.adh_subscription_type, parameters.poolSuffix) }}
-      ${{ if and(parameters.useDemands, ne(parameters.adh_group,''), ne(parameters.adh_subscription_type,'')) }}:
+      ${{ if and(parameters.useDemands, ne(parameters.adh_group, ''), ne(parameters.adh_subscription_type, '')) }}:
         demands:
         - custodian -equals ${{ format('{0}_{1}', parameters.adh_group, parameters.adh_subscription_type) }}
 
@@ -41,16 +41,6 @@ jobs:
 
   steps:
   - checkout: self
-
-  - ${{ if parameters.ensureAz }}:
-    - task: PowerShell@2
-      displayName: Ensure Az modules (optional)
-      inputs:
-        targetType: inline
-        pwsh: true
-        script: |
-          try { Get-Module -ListAvailable Az.Accounts | Out-Null }
-          catch { Install-Module Az -Scope AllUsers -Force -AllowClobber }
 
   - task: PowerShell@2
     displayName: Prepare output folder
