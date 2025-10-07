@@ -1,0 +1,95 @@
+parameters:
+  variableGroup: ''
+  displayName: ''
+  scriptPath: ''
+  workingDir: ''
+  arguments: ''
+  artifactName: ''
+  publishPath: ''
+  ensureAz: false
+
+  # Agent control
+  poolType: 'hosted'          # 'hosted' | 'self'
+  poolName: ''                # optional explicit name
+  poolSuffix: '_agent1'       # used only when poolType=self & poolName=''
+  adh_group: ''               # used for default pool name & optional demands
+  adh_subscription_type: ''   # prd | nonprd
+  useDemands: true            # set false for multi-custodian shared pool
+
+jobs:
+- job: run_powershell
+  displayName: ${{ parameters.displayName }}
+
+  ${{ if eq(parameters.poolType, 'hosted') }}:
+    pool:
+      vmImage: 'windows-latest'
+
+  ${{ if ne(parameters.poolType, 'hosted') }}:
+    pool:
+      ${{ if ne(parameters.poolName, '') }}:
+        name: ${{ parameters.poolName }}
+      ${{ if eq(parameters.poolName, '') }}:
+        name: ${{ format('{0}_{1}{2}', parameters.adh_group, parameters.adh_subscription_type, parameters.poolSuffix) }}
+      ${{ if and(parameters.useDemands, ne(parameters.adh_group, ''), ne(parameters.adh_subscription_type, '')) }}:
+        demands:
+        - custodian -equals ${{ format('{0}_{1}', parameters.adh_group, parameters.adh_subscription_type) }}
+
+  variables:
+  - group: ${{ parameters.variableGroup }}
+
+  steps:
+  - checkout: self
+
+  - ${{ if parameters.ensureAz }}:
+    - task: PowerShell@2
+      displayName: Ensure Az modules
+      inputs:
+        targetType: inline
+        pwsh: true
+        script: |
+          try {
+            Get-Module -ListAvailable Az.Accounts | Out-Null
+          } catch {
+            Install-Module Az -Scope AllUsers -Force -AllowClobber
+          }
+
+  - task: PowerShell@2
+    displayName: Prepare output folder
+    inputs:
+      targetType: inline
+      pwsh: true
+      script: |
+        $out = "${{ parameters.publishPath }}"
+        if ([string]::IsNullOrWhiteSpace($out)) { throw "publishPath parameter is empty." }
+        if (-not (Test-Path -LiteralPath $out)) { New-Item -ItemType Directory -Path $out -Force | Out-Null }
+        Write-Host "Prepared: $out"
+
+  - task: PowerShell@2
+    displayName: Run ${{ parameters.scriptPath }}
+    inputs:
+      targetType: filePath
+      filePath: ${{ parameters.scriptPath }}
+      workingDirectory: ${{ parameters.workingDir }}
+      arguments: ${{ parameters.arguments }}
+      pwsh: true
+
+  - task: PowerShell@2
+    displayName: List publish dir
+    inputs:
+      targetType: inline
+      pwsh: true
+      script: |
+        $out = "${{ parameters.publishPath }}"
+        if (Test-Path -LiteralPath $out) {
+          Get-ChildItem -Recurse -Force $out | Format-Table -AutoSize
+        } else {
+          Write-Warning "Publish path missing: $out"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          Set-Content -Path (Join-Path $out 'README.txt') -Value 'No output files were produced.'
+        }
+
+  - task: PublishBuildArtifacts@1
+    displayName: Publish artifact
+    inputs:
+      PathtoPublish: ${{ parameters.publishPath }}
+      ArtifactName: ${{ parameters.artifactName }}
