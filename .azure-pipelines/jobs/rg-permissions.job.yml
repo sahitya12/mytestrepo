@@ -1,0 +1,56 @@
+parameters:
+  run_mode: 'ByCustodian'          # ByCustodian | AllADH
+  adh_group: ''
+  adh_subscription_type: ''        # prd | nonprd
+  prodCsvPath: ''
+  nonProdCsvPath: ''
+  variableGroup: 'modernization_tfstate_backend_details'
+  outDir: '$(Build.ArtifactStagingDirectory)/rg-perms'
+  branchName: ''
+
+  poolType: 'self'                 # hosted | self
+  poolName: ''                     # explicit name (prefer for AllADH)
+  poolSuffix: '_agent1'            # _agent1 | _agent2
+  useDemands: true
+
+# ---------------- ByCustodian ----------------
+- ${{ if eq(parameters.run_mode, 'ByCustodian') }}:
+  - template: ../templates/job.powershell-with-az.yml
+    parameters:
+      variableGroup: ${{ parameters.variableGroup }}
+      displayName: 'RG Permissions – ByCustodian'
+      scriptPath: 'sanitychecks/scripts/Scan-RG-Permissions-ByCustodian.ps1'
+      workingDir: '$(Build.SourcesDirectory)/sanitychecks/scripts'
+      arguments: >
+        -TenantId "$(tenant_id)" -ClientId "$(backend_client_id)" -ClientSecret "$(backend_client_secret)"
+        -ProdCsvPath "${{ parameters.prodCsvPath }}" -NonProdCsvPath "${{ parameters.nonProdCsvPath }}"
+        -adh_group "${{ parameters.adh_group }}" -OutputDir "${{ parameters.outDir }}" -BranchName "${{ parameters.branchName }}"
+      artifactName: 'rg-perms'
+      publishPath: "${{ parameters.outDir }}"
+      poolType: ${{ parameters.poolType }}
+      poolName: ${{ parameters.poolName }}
+      poolSuffix: ${{ parameters.poolSuffix }}
+      adh_group: ${{ parameters.adh_group }}
+      adh_subscription_type: ${{ parameters.adh_subscription_type }}
+      useDemands: ${{ parameters.useDemands }}
+
+# ---------------- AllADH ----------------
+- ${{ if ne(parameters.run_mode, 'ByCustodian') }}:
+  - template: ../templates/job.powershell-with-az.yml
+    parameters:
+      variableGroup: ${{ parameters.variableGroup }}
+      displayName: 'RG Permissions – ALLADH'
+      scriptPath: 'sanitychecks/scripts/Scan-RG-Permissions-AllADH.ps1'
+      workingDir: '$(Build.SourcesDirectory)/sanitychecks/scripts'
+      arguments: >
+        -TenantId "$(tenant_id)" -ClientId "$(backend_client_id)" -ClientSecret "$(backend_client_secret)"
+        -ProdCsvPath "${{ parameters.prodCsvPath }}" -NonProdCsvPath "${{ parameters.nonProdCsvPath }}"
+        -OutputDir "${{ parameters.outDir }}" -BranchName "${{ parameters.branchName }}"
+      artifactName: 'rg-perms-ALLADH'
+      publishPath: "${{ parameters.outDir }}"
+      poolType: ${{ parameters.poolType }}
+      poolName: ${{ parameters.poolName }}   # e.g. MDM_nonprd_agent1 / MDM_prd_agent1
+      poolSuffix: ${{ parameters.poolSuffix }}
+      adh_group: ''                           # not used
+      adh_subscription_type: ${{ parameters.adh_subscription_type }}
+      useDemands: false
